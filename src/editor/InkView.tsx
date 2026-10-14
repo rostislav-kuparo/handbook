@@ -5,7 +5,8 @@ import { FALLBACK_FONTS, HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
 import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes } from './layout';
-import { PITCH, SHEET_GAP, SHEET_H, SHEET_W, type Geometry, type PaperStyle } from './page';
+import { flowPages, placeFloats } from './inkPages';
+import { SHEET_GAP, SHEET_H, SHEET_W, type Geometry, type PaperStyle } from './page';
 import { PageContext, paperVars, Sheet } from './Paper';
 
 interface Props {
@@ -19,9 +20,6 @@ interface Props {
   ink: string;
   onRendered?: () => void;
 }
-
-type Item = { kind: 'line'; para: number; line: number } | { kind: 'block'; node: number };
-type Placed = Item & { y: number };
 
 /** Fill for a colour index: 0 is the document pen (theme-aware via CSS), others carry their colour. */
 function inkProps(color: number, palette: string[]) {
@@ -83,43 +81,12 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
     };
   }, [runs, fontSize, fontVersion, docId, style.sag, style.lineJitter, geo.contentW]);
 
-  // Flow lines and blocks onto sheets. Page 1 starts below the two-line title (if shown).
-  const pages = useMemo(() => {
-    const out: Placed[][] = [[]];
-    let y = titleH;
-    const place = (item: Item, h: number) => {
-      if (y > 0 && y + h > geo.contentH + 0.5 && h <= geo.contentH) {
-        out.push([]);
-        y = 0;
-      }
-      out[out.length - 1].push({ ...item, y });
-      y += h;
-    };
-    nodes.forEach((n, i) => {
-      if (n.type === 'htmlBlock') {
-        if (n.attrs?.float) return;
-        place({ kind: 'block', node: i }, Math.ceil((blockHeights[i] ?? 260) / lh - 0.001) * lh);
-      } else {
-        const lines = renders[i]?.lines ?? 1;
-        for (let k = 0; k < lines; k++) place({ kind: 'line', para: i, line: k }, lh);
-      }
-    });
-    return out;
-  }, [nodes, renders, blockHeights, lh, titleH, geo.contentH]);
-
-  // Floating blocks keep the position they have over the editor's text column.
-  const floats = nodes
-    .map((n, i) => ({ n, i }))
-    .filter(({ n }) => n.type === 'htmlBlock' && n.attrs?.float)
-    .map(({ n, i }) => {
-      const a = n.attrs ?? {};
-      const stackY = geo.margin.top + titleH + Number(a.y ?? 0);
-      let page = Math.max(0, Math.floor(stackY / PITCH));
-      // A block whose top falls into the gap between sheets goes to the next sheet (print clips sheets).
-      if (stackY - page * PITCH > SHEET_H - 40) page += 1;
-      const top = Math.max(0, stackY - page * PITCH);
-      return { i, a, page, top, left: geo.margin.left + Number(a.x ?? 0), width: Number(a.w ?? 360) };
-    });
+  // Flow lines and blocks onto sheets (the PNG/SVG export uses the same layout).
+  const pages = useMemo(
+    () => flowPages(nodes, (i) => renders[i]?.lines ?? 1, (i) => blockHeights[i] ?? 260, lh, titleH, geo.contentH),
+    [nodes, renders, blockHeights, lh, titleH, geo.contentH],
+  );
+  const floats = placeFloats(nodes, geo, titleH);
   const pageCount = Math.max(pages.length, ...floats.map((f) => f.page + 1));
   const missing = [...new Set(renders.flatMap((r) => r?.missing ?? []))];
 
@@ -192,7 +159,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
               .filter((f) => f.page === p)
               .map((f) => (
                 <div key={`f${f.i}`} className="ink-float" style={{ top: f.top, left: f.left, width: f.width }}>
-                  <BlockFrame code={String(f.a.code ?? '')} data={f.a.data} title={String(f.a.title ?? 'Блок')} />
+                  <BlockFrame code={String(f.attrs.code ?? '')} data={f.attrs.data} title={String(f.attrs.title ?? 'Блок')} />
                 </div>
               ))}
           </Sheet>

@@ -1058,8 +1058,6 @@ line.guide.dashed {
   .toolbar,
   .ink-busy,
   .ink-missing,
-  .sheet-rules,
-  .sheet-margin,
   .html-block-head {
     display: none !important;
   }
@@ -1279,6 +1277,157 @@ line.guide.dashed {
   flex-wrap: wrap;
 }
 
+/* ---------- render button and its settings ---------- */
+.btn-group {
+  display: flex;
+  align-items: stretch;
+}
+.btn-group > .btn {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.btn-group > .menu > summary.btn {
+  height: 100%;
+  margin-left: -1px;
+  padding: 6px 10px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.render-menu {
+  width: 340px;
+  min-width: 0 !important;
+  max-height: min(72vh, 680px);
+  overflow: auto;
+  padding: 12px !important;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 13px;
+}
+.render-menu .panel {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+.render-note {
+  margin: 0;
+}
+.side-hint {
+  margin: 0;
+  padding: 0 4px;
+}
+
+/* ---------- export history (top bar) ---------- */
+.exports {
+  position: relative;
+}
+.exports-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.exports-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.exports-btn.new::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok);
+  border: 2px solid var(--panel);
+}
+.exports-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 70;
+  width: 360px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.exports-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.link-btn {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.link-btn:hover {
+  color: var(--text);
+}
+.exports-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow: auto;
+}
+.exports-panel li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px;
+  border-radius: 8px;
+}
+.exports-panel li.fresh {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.exports-ext {
+  flex: none;
+  width: 36px;
+  padding: 3px 0;
+  border-radius: 5px;
+  background: var(--desk);
+  color: var(--muted);
+  font: 600 10px system-ui, sans-serif;
+  text-align: center;
+}
+.exports-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.exports-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.exports-actions {
+  display: flex;
+  gap: 4px;
+}
+.exports-actions .btn {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.exports-foot {
+  margin: 8px 4px 0;
+}
+
 /* ---------- formulas ---------- */
 /* Indices: smaller letters moved off the baseline without touching the line
    box (the ruling stays). Raise in em of the surrounding text, as in the ink
@@ -1409,7 +1558,17 @@ line.guide.dashed {
   .paper-stack {
     --pen-mix: 100% !important;
   }
-  .ink-stack .sheet-grid {
-    display: none !important;
+  /* The paper the document uses (ruled / squared) prints too; plain paper stays plain.
+     Light-theme colours, and backgrounds printed even without "background graphics". */
+  .ink-stack {
+    --rule: rgba(70, 105, 170, 0.2);
+    --grid-line: rgba(70, 105, 170, 0.14);
+    --margin-line: rgba(217, 83, 63, 0.35);
+  }
+  .ink-stack .sheet-rules,
+  .ink-stack .sheet-grid,
+  .ink-stack .sheet-margin {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 }

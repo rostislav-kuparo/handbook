@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Documents } from './editor/Documents';
 import { useHandwriting } from './engine/handwriting';
 import { getSetting, setSetting } from './storage/db';
+import { ExportsButton } from './ExportsButton';
 import { Studio } from './studio/Studio';
 
 type Tab = 'docs' | 'studio';
@@ -82,6 +83,7 @@ export function App() {
           <div className="font-status" title="Шрифт собирается из ваших образцов на лету">
             {!loaded ? 'загрузка…' : building ? <span className="pulse">собираю шрифт…</span> : `букв в почерке: ${byChar.size}`}
           </div>
+          <ExportsButton />
           <ThemeToggle />
         </div>
       </header>

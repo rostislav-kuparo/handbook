@@ -5,13 +5,14 @@ import { HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent, HandDocument } from '../model/types';
 import { createDocument, db, exportEverything, getSetting, importEverything, importHandwriting, setSetting } from '../storage/db';
-import { downloadBlob } from '../util/download';
+import { saveFile } from '../util/download';
 import { useLive } from '../util/useLive';
 import { exportDocumentJson, exportFont, exportPng, exportSvg } from './exporters';
 import { HandEditor } from './HandEditor';
 import { InkView } from './InkView';
 import { geometry, pageSetup, type PageSetup } from './page';
 import { PageMenu } from './PageMenu';
+import { RenderMenu } from './RenderMenu';
 import { SymbolsMenu } from './SymbolsMenu';
 import { Paper } from './Paper';
 import { welcomeContent } from './welcome';
@@ -125,7 +126,7 @@ export function Documents() {
   const saveEverything = async () => {
     const data = await exportEverything();
     const day = new Date().toISOString().slice(0, 10);
-    downloadBlob(new Blob([JSON.stringify(data)], { type: 'application/json' }), `handbook-backup-${day}.json`);
+    await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), `handbook-backup-${day}.json`);
   };
 
   const removeDoc = async (d: HandDocument) => {
@@ -139,7 +140,17 @@ export function Documents() {
     void setSetting('editor.fontSize', v);
   };
 
-  const pageWidth = () => geo.contentW;
+  /** What the PNG/SVG export draws: the open document on its sheets, as the rendered view shows it. */
+  const pageExport = () => ({
+    docId: doc!.id,
+    title: doc!.title,
+    showTitle: setup.showTitle,
+    content: content!,
+    fontSize,
+    geo,
+    paper: setup.paper,
+    ink: setup.ink,
+  });
 
   const print = () => {
     setInk(true);
@@ -224,9 +235,16 @@ export function Documents() {
 
               <SymbolsMenu editor={editor} disabled={ink || !editor} />
 
-              <button className={`btn push-right ${ink ? 'on' : ''}`} onClick={() => setInk(!ink)} title="Каждая буква уникальна, как на бумаге">
-                {ink ? '✎ Редактировать' : '✒ Чернила'}
-              </button>
+              <div className="btn-group push-right">
+                <button
+                  className={`btn ${ink ? 'on' : ''}`}
+                  onClick={() => setInk(!ink)}
+                  title="Нарисовать текст ручкой: каждая буква уникальна, строки неровные, как на бумаге"
+                >
+                  {ink ? '✎ Редактировать' : '✒ Отрендерить'}
+                </button>
+                <RenderMenu />
+              </div>
 
               <details className="menu right">
                 <summary className="btn">Экспорт ▾</summary>
@@ -235,17 +253,17 @@ export function Documents() {
                     <strong>Печать / PDF</strong>
                     <span className="muted small">вместе с блоками</span>
                   </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportPng(doc.id, doc.title, content, pageWidth(), fontSize, setup.ink))}>
+                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportPng(pageExport()))}>
                     <strong>Картинка PNG</strong>
                   </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportSvg(doc.id, doc.title, content, pageWidth(), fontSize, setup.ink))}>
+                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportSvg(pageExport()))}>
                     <strong>Вектор SVG</strong>
                   </button>
-                  <button disabled={!fontBytes} onClick={(e) => (closeMenus(e.currentTarget), exportFont())}>
+                  <button disabled={!fontBytes} onClick={(e) => (closeMenus(e.currentTarget), void exportFont())}>
                     <strong>Мой шрифт .ttf</strong>
                     <span className="muted small">для Word, Figma и т. п.</span>
                   </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), exportDocumentJson(doc.title, content))}>
+                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportDocumentJson(doc.title, content))}>
                     <strong>Документ .json</strong>
                   </button>
                 </div>

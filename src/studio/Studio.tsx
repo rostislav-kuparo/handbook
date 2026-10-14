@@ -5,12 +5,12 @@ import { CHAR_GROUPS, isLetter, isPair, PANGRAM, SUGGESTED_PAIRS } from '../mode
 import { detectAnchors } from '../model/anchors';
 import { Stroke, uid } from '../model/types';
 import { exportHandwriting, getSetting, importHandwriting, setSetting } from '../storage/db';
-import { downloadBlob } from '../util/download';
+import { saveFile } from '../util/download';
 import { CaptureCanvas } from './CaptureCanvas';
 import { PhraseStudio } from './PhraseStudio';
 import { Progress } from './Progress';
 import { SampleThumb } from './SampleThumb';
-import { StylePanel } from './StylePanel';
+import { LetterSettings } from './LetterSettings';
 import { SynthPreview } from './SynthPreview';
 
 type Mode = 'letters' | 'phrase';
@@ -115,7 +115,7 @@ export function Studio() {
 
   const exportBackup = async () => {
     const data = await exportHandwriting();
-    downloadBlob(new Blob([JSON.stringify(data)], { type: 'application/json' }), 'pocherk.handbook.json');
+    await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), 'pocherk.handbook.json');
   };
 
   const importBackup = async (file: File) => {
@@ -259,7 +259,7 @@ export function Studio() {
             {phrase}
           </p>
         </section>
-        <StylePanel />
+        <LetterSettings />
         <section className="panel">
           <h3>Резервная копия</h3>
           <div className="row">
