@@ -1,0 +1,45 @@
+{
+  "name": "handbook",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Handwriting text editor: your own handwriting as a living font, with embedded HTML blocks",
+  "scripts": {
+    "prepare-assets": "node scripts/prepare.mjs",
+    "wasm": "node scripts/prepare.mjs --force-wasm",
+    "dev": "node scripts/prepare.mjs && vite",
+    "build": "node scripts/prepare.mjs && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test:core": "node scripts/with-cargo.mjs cargo test -p glyph-core",
+    "tauri": "node scripts/with-cargo.mjs tauri",
+    "app": "node scripts/with-cargo.mjs tauri dev",
+    "app:build": "node scripts/with-cargo.mjs tauri build"
+  },
+  "dependencies": {
+    "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-json": "^6.0.2",
+    "@tiptap/core": "^3.32.0",
+    "@tiptap/extension-document": "^3.32.0",
+    "@tiptap/extension-paragraph": "^3.32.0",
+    "@tiptap/extension-text": "^3.32.0",
+    "@tiptap/extensions": "^3.32.0",
+    "@tiptap/pm": "^3.32.0",
+    "@tiptap/react": "^3.32.0",
+    "chart.js": "^4.5.1",
+    "codemirror": "^6.0.2",
+    "dexie": "^4.4.6",
+    "perfect-freehand": "^1.2.3",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "roughjs": "^4.6.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.4"
+  }
+}

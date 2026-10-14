@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+public/vendor/
+crates/glyph-core/pkg/
+src-tauri/gen/
+backup/
+*.log
+.claude/
