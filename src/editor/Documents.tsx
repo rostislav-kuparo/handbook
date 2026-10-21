@@ -1,6 +1,7 @@
 import type { Editor } from '@tiptap/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TEMPLATES } from '../blocks/templates';
+import { SketchHelp } from '../sketch/SketchHelp';
 import { HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent, HandDocument } from '../model/types';
@@ -42,6 +43,7 @@ export function Documents() {
   const [pages, setPages] = useState(1);
   const [printPending, setPrintPending] = useState(false);
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [sketchHelp, setSketchHelp] = useState(false);
   // Content of the open document, tagged with its id so a stale one is never shown.
   const [loaded, setLoaded] = useState<{ id: string; content: DocContent } | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -211,6 +213,26 @@ export function Documents() {
               <details className="menu">
                 <summary className="btn">Вставить блок ▾</summary>
                 <div className="menu-items">
+                  <button
+                    disabled={ink || !editor}
+                    onClick={(e) => {
+                      closeMenus(e.currentTarget);
+                      editor?.chain().focus().insertHtmlBlock({ kind: 'sketch', title: 'Чертёж', code: '' }).run();
+                    }}
+                  >
+                    <strong>Чертёж</strong>
+                    <span className="muted small">график или геометрия командами GeoGebra — рисуется вашим почерком</span>
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      closeMenus(e.currentTarget);
+                      setSketchHelp(true);
+                    }}
+                  >
+                    <strong>Команды чертежа и запрос для нейронки</strong>
+                    <span className="muted small">справка с примерами</span>
+                  </button>
+                  <hr className="menu-sep" />
                   {TEMPLATES.map((t) => (
                     <button
                       key={t.id}
@@ -319,6 +341,7 @@ export function Documents() {
           </>
         )}
       </main>
+      {sketchHelp && <SketchHelp onClose={() => setSketchHelp(false)} />}
     </div>
   );
 }

@@ -3,6 +3,8 @@ import { ReactNodeViewRenderer } from '@tiptap/react';
 import { HtmlBlockView } from './HtmlBlockView';
 
 export interface HtmlBlockAttrs {
+  /** «html»: live HTML in a sandbox; «sketch»: a drawing from commands (src/sketch). */
+  kind: 'html' | 'sketch';
   title: string;
   code: string;
   data: unknown;
@@ -35,6 +37,9 @@ function parseJson(raw: string | null): unknown {
  * A live HTML block inside the document. Code and data are stored separately:
  * the code renders, the data is what the user edits (a chart's numbers,
  * shapes on a board) and survives code changes.
+ *
+ * A «Чертёж» is the same node with kind «sketch»: its code is drawing
+ * commands, drawn by the app in the user's hand (no iframe, no data).
  */
 export const HtmlBlock = Node.create({
   name: 'htmlBlock',
@@ -46,6 +51,7 @@ export const HtmlBlock = Node.create({
 
   addAttributes() {
     return {
+      kind: { default: 'html', rendered: false },
       title: { default: 'Блок', rendered: false },
       code: { default: '', rendered: false },
       data: { default: {}, rendered: false },
@@ -62,6 +68,7 @@ export const HtmlBlock = Node.create({
       {
         tag: 'div[data-html-block]',
         getAttrs: (el) => ({
+          kind: el.getAttribute('data-kind') === 'sketch' ? 'sketch' : 'html',
           title: el.getAttribute('data-title') ?? 'Блок',
           code: el.getAttribute('data-code') ?? '',
           data: parseJson(el.getAttribute('data-data')),
@@ -80,6 +87,7 @@ export const HtmlBlock = Node.create({
       'div',
       mergeAttributes(HTMLAttributes, {
         'data-html-block': '',
+        'data-kind': node.attrs.kind,
         'data-title': node.attrs.title,
         'data-code': node.attrs.code,
         'data-data': JSON.stringify(node.attrs.data),

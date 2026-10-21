@@ -2,6 +2,7 @@ import { engine, type ParagraphRender } from '../engine/client';
 import { FALLBACK_FONTS } from '../engine/constants';
 import { getHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
+import { drawingBody, drawSketch, heightOf, penFor, sketchLayout } from '../sketch/render';
 import { safeFilename, saveFile } from '../util/download';
 import { blockSpan, flowPages, placeFloats, titleHeight } from './inkPages';
 import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes } from './layout';
@@ -92,14 +93,21 @@ export async function documentPages(o: PageExport): Promise<string[]> {
     : null;
 
   const titleH = titleHeight(o.showTitle, lh);
+  const isSketch = (a: Record<string, unknown> | undefined) => a?.kind === 'sketch';
   const pages = flowPages(
     nodes,
     (i) => renders[i]?.lines ?? 1,
-    (i) => Number(nodes[i].attrs?.height) || 260,
+    (i) => (isSketch(nodes[i].attrs) ? heightOf(String(nodes[i].attrs?.code ?? ''), geo.contentW, fontSize) : Number(nodes[i].attrs?.height) || 260),
     lh,
     titleH,
     geo.contentH,
   );
+  /** A drawing in the user's hand, as on screen, with the document's pen colour. */
+  const pen = penFor(getHandwriting().style, fontSize);
+  const sketchAt = async (a: Record<string, unknown>, x: number, y: number, width: number) => {
+    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, pen));
+    return `<svg x="${x}" y="${y}" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, o.ink)}</svg>`;
+  };
   const floats = placeFloats(nodes, geo, titleH);
   const pageCount = Math.max(pages.length, ...floats.map((f) => f.page + 1));
 
@@ -123,19 +131,21 @@ export async function documentPages(o: PageExport): Promise<string[]> {
         if (r) body.push(inkLine(r, it.line, `translate(0 ${it.y}) scale(${s}) translate(0 ${-(INK_VIEWBOX_TOP + it.line * LINE_HEIGHT_UNITS)})`));
       } else {
         const a = nodes[it.node].attrs ?? {};
-        body.push(blockFrame(0, it.y, geo.contentW, blockSpan(Number(a.height) || 260, lh), String(a.title ?? 'Блок')));
+        if (isSketch(a)) body.push(await sketchAt(a, 0, it.y, geo.contentW));
+        else body.push(blockFrame(0, it.y, geo.contentW, blockSpan(Number(a.height) || 260, lh), String(a.title ?? 'Блок')));
       }
     }
-    const floating = floats
-      .filter((f) => f.page === p)
-      .map((f) => blockFrame(f.left, f.top, f.width, Number(f.attrs.height) || 260, String(f.attrs.title ?? 'Блок')))
-      .join('');
+    const floating: string[] = [];
+    for (const f of floats.filter((f) => f.page === p)) {
+      if (isSketch(f.attrs)) floating.push(await sketchAt(f.attrs, f.left, f.top, f.width));
+      else floating.push(blockFrame(f.left, f.top, f.width, Number(f.attrs.height) || 260, String(f.attrs.title ?? 'Блок')));
+    }
     const number = `<text x="${SHEET_W / 2}" y="${SHEET_H - Math.min(28, geo.margin.bottom / 2.5) - 3}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#6b7390">${p + 1}</text>`;
     out.push(
       `<svg xmlns="http://www.w3.org/2000/svg" width="${SHEET_W}" height="${SHEET_H}" viewBox="0 0 ${SHEET_W} ${SHEET_H}">` +
         `<rect width="100%" height="100%" fill="${PAPER}"/>${paperSvg(o.paper, geo, lh, baseline)}` +
         `<g transform="translate(${geo.margin.left} ${geo.margin.top})" font-family='${FALLBACK_FONTS}'>${body.join('')}</g>` +
-        `${floating}${pageCount > 1 ? number : ''}</svg>`,
+        `${floating.join('')}${pageCount > 1 ? number : ''}</svg>`,
     );
   }
   return out;

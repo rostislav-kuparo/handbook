@@ -4,6 +4,8 @@ import { engine, ParagraphRender } from '../engine/client';
 import { FALLBACK_FONTS, HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
+import { heightOf } from '../sketch/render';
+import { SketchFigure } from '../sketch/SketchFigure';
 import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes } from './layout';
 import { flowPages, placeFloats } from './inkPages';
 import { SHEET_GAP, SHEET_H, SHEET_W, type Geometry, type PaperStyle } from './page';
@@ -82,9 +84,18 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
   }, [runs, fontSize, fontVersion, docId, style.sag, style.lineJitter, geo.contentW]);
 
   // Flow lines and blocks onto sheets (the PNG/SVG export uses the same layout).
+  // A drawing knows its height before it is drawn; an HTML block reports it once loaded.
   const pages = useMemo(
-    () => flowPages(nodes, (i) => renders[i]?.lines ?? 1, (i) => blockHeights[i] ?? 260, lh, titleH, geo.contentH),
-    [nodes, renders, blockHeights, lh, titleH, geo.contentH],
+    () =>
+      flowPages(
+        nodes,
+        (i) => renders[i]?.lines ?? 1,
+        (i) => (nodes[i].attrs?.kind === 'sketch' ? heightOf(String(nodes[i].attrs?.code ?? ''), geo.contentW, fontSize) : blockHeights[i] ?? 260),
+        lh,
+        titleH,
+        geo.contentH,
+      ),
+    [nodes, renders, blockHeights, lh, titleH, geo.contentH, geo.contentW, fontSize],
   );
   const floats = placeFloats(nodes, geo, titleH);
   const pageCount = Math.max(pages.length, ...floats.map((f) => f.page + 1));
@@ -112,6 +123,13 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
               {(pages[p] ?? []).map((it) => {
                 if (it.kind === 'block') {
                   const a = nodes[it.node].attrs ?? {};
+                  if (a.kind === 'sketch') {
+                    return (
+                      <div key={`b${it.node}`} className="ink-block" style={{ top: it.y }}>
+                        <SketchFigure code={String(a.code ?? '')} width={geo.contentW} fontSize={fontSize} />
+                      </div>
+                    );
+                  }
                   return (
                     <div key={`b${it.node}`} className="ink-block" style={{ top: it.y }}>
                       <BlockFrame
@@ -159,7 +177,11 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
               .filter((f) => f.page === p)
               .map((f) => (
                 <div key={`f${f.i}`} className="ink-float" style={{ top: f.top, left: f.left, width: f.width }}>
-                  <BlockFrame code={String(f.attrs.code ?? '')} data={f.attrs.data} title={String(f.attrs.title ?? 'Блок')} />
+                  {f.attrs.kind === 'sketch' ? (
+                    <SketchFigure code={String(f.attrs.code ?? '')} width={f.width} fontSize={fontSize} />
+                  ) : (
+                    <BlockFrame code={String(f.attrs.code ?? '')} data={f.attrs.data} title={String(f.attrs.title ?? 'Блок')} />
+                  )}
                 </div>
               ))}
           </Sheet>

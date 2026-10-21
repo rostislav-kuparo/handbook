@@ -8,6 +8,10 @@ import { useVendor } from './useVendor';
 import { LINE_HEIGHT_EM } from '../editor/layout';
 import { SHEET_W } from '../editor/page';
 import { PageContext } from '../editor/Paper';
+import { compileSketch } from '../sketch/evaluate';
+import { SketchFigure } from '../sketch/SketchFigure';
+import { SketchHelp } from '../sketch/SketchHelp';
+import { SketchPanel } from '../sketch/SketchPanel';
 
 const MAX_DATA_BYTES = 500_000;
 
@@ -22,7 +26,10 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
   const fromPanel = useRef(''); // JSON of the data typed into the data panel
 
   const [height, setHeight] = useState(attrs.height);
-  const [panel, setPanel] = useState<null | 'code' | 'data'>(null);
+  const sketch = attrs.kind === 'sketch';
+  // A new, empty drawing opens with its commands, ready for a paste.
+  const [panel, setPanel] = useState<null | 'code' | 'data'>(() => (attrs.kind === 'sketch' && !attrs.code.trim() ? 'code' : null));
+  const [help, setHelp] = useState(false);
   const [appliedCode, setAppliedCode] = useState(attrs.code);
   const [draftCode, setDraftCode] = useState(attrs.code);
   const [draftData, setDraftData] = useState(() => JSON.stringify(attrs.data, null, 2));
@@ -96,6 +103,13 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
   }, [fontVersion, post]);
 
   const applyCode = () => updateAttributes({ code: draftCode });
+
+  const sketchErrors = useMemo(() => (sketch ? compileSketch(attrs.code).errors.length : 0), [sketch, attrs.code]);
+  const insertIntoSketch = (snippet: string) => {
+    const code = attrsRef.current.code;
+    updateAttributes({ code: code.trim() ? `${code.replace(/\s*$/, '')}\n${snippet}` : snippet });
+    setPanel('code');
+  };
 
   const dataTimer = useRef<number | undefined>(undefined);
   const onDataEdit = (text: string) => {
@@ -231,22 +245,44 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
           >
             {attrs.float ? '↧ В текст' : '⇱ Поверх'}
           </button>
-          <button className={panel === 'data' ? 'on' : ''} onClick={() => setPanel(panel === 'data' ? null : 'data')}>
-            Данные
-          </button>
-          <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
-            Код
-          </button>
-          <button onClick={() => setReloadKey((k) => k + 1)} title="Перезапустить блок">
-            ↻
-          </button>
+          {sketch ? (
+            <>
+              <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
+                Команды
+              </button>
+              <button onClick={() => setHelp(true)} title="Все команды, примеры и запрос для нейронки">
+                ? Справка
+              </button>
+            </>
+          ) : (
+            <>
+              <button className={panel === 'data' ? 'on' : ''} onClick={() => setPanel(panel === 'data' ? null : 'data')}>
+                Данные
+              </button>
+              <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
+                Код
+              </button>
+              <button onClick={() => setReloadKey((k) => k + 1)} title="Перезапустить блок">
+                ↻
+              </button>
+            </>
+          )}
           <button onClick={() => deleteNode()} title="Удалить блок" className="danger">
             ✕
           </button>
         </div>
       </div>
 
-      {srcdoc ? (
+      {sketch ? (
+        <>
+          <SketchFigure code={attrs.code} placeholder="Пустой чертёж: напишите команды ниже или вставьте ответ нейронки. «? Справка» — все команды и готовый запрос." />
+          {sketchErrors > 0 && !panel && (
+            <button className="sketch-badge no-print" contentEditable={false} onClick={() => setPanel('code')}>
+              ⚠ Строк с ошибками: {sketchErrors} — открыть команды
+            </button>
+          )}
+        </>
+      ) : srcdoc ? (
         <iframe
           key={reloadKey}
           ref={iframeRef}
@@ -263,7 +299,9 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
 
       {panel && (
         <div className="html-block-panel" contentEditable={false}>
-          {panel === 'code' ? (
+          {sketch ? (
+            <SketchPanel code={attrs.code} onChange={(code) => updateAttributes({ code })} onHelp={() => setHelp(true)} />
+          ) : panel === 'code' ? (
             <>
               <CodeEditor value={draftCode} language="html" onChange={setDraftCode} onSubmit={applyCode} />
               <div className="row">
@@ -294,6 +332,7 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
         </div>
       )}
       </div>
+      {help && <SketchHelp onClose={() => setHelp(false)} onInsert={insertIntoSketch} />}
       {attrs.float && (
         <span className="resize-handle" contentEditable={false} onPointerDown={(e) => startDrag(e, 'resize')} title="Ширина блока" />
       )}

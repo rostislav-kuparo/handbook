@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'react';
 
 interface Props {
   value: string;
-  language: 'html' | 'json';
+  language: 'html' | 'json' | 'plain';
   onChange: (value: string) => void;
   /** Ctrl+Enter */
   onSubmit?: () => void;
@@ -24,7 +24,7 @@ export function CodeEditor({ value, language, onChange, onSubmit }: Props) {
       parent: hostRef.current!,
       extensions: [
         basicSetup,
-        language === 'html' ? html() : json(),
+        language === 'html' ? html() : language === 'json' ? json() : [],
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
           if (u.docChanged) cbRef.current.onChange(u.state.doc.toString());

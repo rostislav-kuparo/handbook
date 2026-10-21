@@ -560,6 +560,261 @@ kbd {
   font-family: ui-monospace, Consolas, monospace;
 }
 
+/* ---------- «Чертёж» blocks ---------- */
+.menu-sep {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 4px 6px;
+}
+.sketch-figure {
+  position: relative;
+  color: var(--ink);
+}
+.sketch-figure svg {
+  display: block;
+  overflow: visible;
+}
+.sketch-empty {
+  margin: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 24px;
+  border: 1.5px dashed var(--line);
+  border-radius: 10px;
+  font: 13px/1.45 system-ui, sans-serif;
+  color: var(--muted);
+}
+.sketch-badge {
+  display: block;
+  margin: 2px 6px 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: 12px system-ui, sans-serif;
+  color: var(--red);
+  cursor: pointer;
+}
+.sketch-errors {
+  margin: 0;
+  padding: 6px 10px 6px 26px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  color: var(--red);
+  font: 12.5px/1.45 system-ui, sans-serif;
+}
+.sketch-help-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(20, 22, 30, 0.42);
+}
+.sketch-help {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 100%);
+  max-height: min(88vh, 1000px);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  font: 14px/1.45 system-ui, sans-serif;
+}
+.sketch-help-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.sketch-help-top h2 {
+  margin: 0;
+  font-size: 17px;
+  flex: 1;
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.seg button.on {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.sketch-help-close {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.sketch-help-body {
+  overflow-y: auto;
+  padding: 6px 18px 22px;
+}
+.sketch-help-body section {
+  margin-top: 14px;
+}
+.sketch-help-body h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.sketch-help-body p {
+  margin: 0 0 8px;
+}
+.sketch-help code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.sketch-ai {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.sketch-ai textarea,
+.sketch-search {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+.sketch-search {
+  margin: 16px 0 0;
+}
+.sketch-ai details {
+  margin-top: 8px;
+}
+.sketch-ai summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.sketch-rules {
+  margin: 0;
+  padding-left: 18px;
+}
+.sketch-rules li {
+  margin-bottom: 4px;
+}
+.sketch-cmd {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.sketch-cmd-text {
+  flex: 1;
+  min-width: 0;
+}
+.sketch-cmd-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.sketch-cmd-head code {
+  font-weight: 600;
+}
+.sketch-code {
+  margin: 6px 0;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--line) 30%, transparent);
+  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sketch-code.prompt {
+  max-height: 320px;
+  overflow: auto;
+}
+.sketch-preview {
+  flex: none;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-sizing: content-box;
+}
+.sketch-formulas {
+  margin: 0;
+}
+.sketch-formulas div {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+}
+.sketch-formulas dt {
+  flex: 0 0 260px;
+}
+.sketch-formulas dd {
+  margin: 0;
+}
+.sketch-help-note {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 13px;
+  box-shadow: var(--shadow);
+}
+@media (max-width: 640px) {
+  .sketch-help-backdrop {
+    padding: 0;
+  }
+  .sketch-help {
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  .sketch-cmd {
+    flex-direction: column;
+  }
+  .sketch-formulas div {
+    flex-direction: column;
+    gap: 0;
+  }
+  .sketch-formulas dt {
+    flex: none;
+  }
+}
+
 /* ---------- ink view ---------- */
 .ink-stack {
   color: var(--ink);
