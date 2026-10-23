@@ -10,6 +10,7 @@ import type { DocContent, HandDocument } from '../model/types';
 import { HandLayout } from './handLayout';
 import { InkColor, Script, TextSize } from './marks';
 import { MathText } from './mathText';
+import { SketchFences } from './sketchFences';
 import type { Geometry } from './page';
 import { SelectionBar } from './SelectionBar';
 import { Pagination, remeasure } from './pagination';
@@ -62,6 +63,7 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages }: 
         InkColor,
         Script,
         MathText,
+        SketchFences,
         Pagination.configure({ onPages: (n) => onPagesRef.current(n), getGeometry: () => geoRef.current }),
         HandLayout.configure({
           getParams: () => {

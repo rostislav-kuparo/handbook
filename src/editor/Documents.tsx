@@ -15,6 +15,7 @@ import { geometry, pageSetup, type PageSetup } from './page';
 import { PageMenu } from './PageMenu';
 import { RenderMenu } from './RenderMenu';
 import { SymbolsMenu } from './SymbolsMenu';
+import { countSketchFences } from './sketchFences';
 import { Paper } from './Paper';
 import { welcomeContent } from './welcome';
 
@@ -44,6 +45,8 @@ export function Documents() {
   const [printPending, setPrintPending] = useState(false);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [sketchHelp, setSketchHelp] = useState(false);
+  /** Drawings still sitting in the text as ```…```, counted when the insert menu opens. */
+  const [fences, setFences] = useState(0);
   // Content of the open document, tagged with its id so a stale one is never shown.
   const [loaded, setLoaded] = useState<{ id: string; content: DocContent } | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -210,7 +213,12 @@ export function Documents() {
         {doc && content && (
           <>
             <div className="toolbar no-print">
-              <details className="menu">
+              <details
+                className="menu"
+                onToggle={(e) => {
+                  if ((e.currentTarget as HTMLDetailsElement).open && editor) setFences(countSketchFences(editor.state.doc));
+                }}
+              >
                 <summary className="btn">Вставить блок ▾</summary>
                 <div className="menu-items">
                   <button
@@ -231,6 +239,16 @@ export function Documents() {
                   >
                     <strong>Команды чертежа и запрос для нейронки</strong>
                     <span className="muted small">справка с примерами</span>
+                  </button>
+                  <button
+                    disabled={ink || !editor || fences === 0}
+                    onClick={(e) => {
+                      closeMenus(e.currentTarget);
+                      editor?.chain().focus().convertSketchFences().run();
+                    }}
+                  >
+                    <strong>Найти чертежи в тексте{fences > 0 ? ` (${fences})` : ''}</strong>
+                    <span className="muted small">команды между строками ``` или ёёё станут чертежами</span>
                   </button>
                   <hr className="menu-sep" />
                   {TEMPLATES.map((t) => (
