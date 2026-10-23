@@ -2,15 +2,16 @@
 // the help window and the instructions for neural nets, so they never disagree.
 import * as g from './geometry';
 import type { Expr } from './lang';
-import type { Ctx, Shape, Val, Vec } from './types';
+import type { Ctx, Shape, SpaceKind, Val, Vec, Vec3 } from './types';
 
-export type GroupId = 'points' | 'lines' | 'shapes' | 'graphs' | 'text' | 'style' | 'view';
+export type GroupId = 'points' | 'lines' | 'shapes' | 'graphs' | 'space' | 'text' | 'style' | 'view';
 
 export const GROUPS: { id: GroupId; name: string }[] = [
   { id: 'points', name: 'Точки и преобразования' },
   { id: 'lines', name: 'Прямые и отрезки' },
   { id: 'shapes', name: 'Окружности, многоугольники, углы' },
   { id: 'graphs', name: 'Графики' },
+  { id: 'space', name: 'Пространство и эпюр' },
   { id: 'text', name: 'Подписи и текст' },
   { id: 'style', name: 'Оформление' },
   { id: 'view', name: 'Окно и оси' },
@@ -73,6 +74,27 @@ function args(list: Expr[], ...counts: number[]) {
   throw new Error(`нужно ${counts.map(word).join(' или ')}, а дано ${list.length}`);
 }
 
+const is3 = (p: Vec | Vec3): p is Vec3 => 'z' in p;
+
+/** The points of a figure: all on the sheet, or all in space (then it is drawn as an epure). */
+function pointsOf(c: Ctx, list: Expr[]): { flat: Vec[] } | { space: Vec3[] } {
+  const pts = list.map((e) => c.pointAny(e));
+  const n = pts.filter(is3).length;
+  if (n === 0) return { flat: pts };
+  if (n === pts.length) return { space: pts as Vec3[] };
+  throw new Error('нельзя смешивать точки листа (x, y) и точки пространства (x, y, z)');
+}
+
+const space = (of: SpaceKind, pts: Vec3[]): Val => shape({ type: 'space', of, pts });
+const dist3 = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+/** Segment, line, ray or vector through two points, on the sheet or in space. */
+function twoPoints(of: 'segment' | 'line' | 'ray' | 'vector', c: Ctx, list: Expr[]): Val {
+  const pts = pointsOf(c, list);
+  if ('space' in pts) return space(of, pts.space);
+  return shape({ type: of, a: pts.flat[0], b: pts.flat[1] });
+}
+
 function lineOf(c: Ctx, e: Expr): Shape {
   const s = c.shape(e);
   if (!g.isLineLike(s)) throw new Error('нужна прямая, отрезок, луч или вектор');
@@ -107,10 +129,20 @@ export const COMMANDS: Command[] = [
     run(a, c) {
       args(a, 1, 2);
       if (a.length === 1) {
-        const s = lineOf(c, a[0]) as { a: Vec; b: Vec };
-        return point(g.mid(s.a, s.b));
+        const s = c.shape(a[0]);
+        if (s.type === 'space' && s.of !== 'point' && s.of !== 'polygon') {
+          const [p, q] = s.pts;
+          return space('point', [{ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2, z: (p.z + q.z) / 2 }]);
+        }
+        const l = lineOf(c, a[0]) as { a: Vec; b: Vec };
+        return point(g.mid(l.a, l.b));
       }
-      return point(g.mid(c.point(a[0]), c.point(a[1])));
+      const pts = pointsOf(c, a);
+      if ('space' in pts) {
+        const [p, q] = pts.space;
+        return space('point', [{ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2, z: (p.z + q.z) / 2 }]);
+      }
+      return point(g.mid(pts.flat[0], pts.flat[1]));
     },
   },
   {
@@ -138,11 +170,17 @@ export const COMMANDS: Command[] = [
     names: ['Расстояние', 'Distance'],
     group: 'points',
     forms: ['@(A, B)', '@(A, прямая)'],
-    doc: 'Число: расстояние между точками или от точки до прямой.',
+    doc: 'Число: расстояние между точками или от точки до прямой. Для точек в пространстве — настоящее расстояние (натуральная величина).',
     example: 'A = (0, 0)\nB = (3, 4)\nd = Distance(A, B)\nCircle(A, d)',
     run(a, c) {
       args(a, 2);
-      return num(g.distanceTo(c.point(a[0]), c.shape(a[1])));
+      const first = c.pointAny(a[0]);
+      if (is3(first)) {
+        const second = c.pointAny(a[1]);
+        if (!is3(second)) throw new Error('нельзя смешивать точки листа (x, y) и точки пространства (x, y, z)');
+        return num(dist3(first, second));
+      }
+      return num(g.distanceTo(first, c.shape(a[1])));
     },
   },
   {
@@ -154,6 +192,13 @@ export const COMMANDS: Command[] = [
     run(a, c) {
       args(a, 1);
       const s = c.shape(a[0]);
+      if (s.type === 'space') {
+        if (s.of === 'point' || s.of === 'line' || s.of === 'ray') throw new Error('длина есть у отрезка, вектора и многоугольника');
+        const closed = s.of === 'polygon';
+        let sum = 0;
+        for (let i = 0; i + (closed ? 0 : 1) < s.pts.length; i++) sum += dist3(s.pts[i], s.pts[(i + 1) % s.pts.length]);
+        return num(sum);
+      }
       if (s.type === 'segment' || s.type === 'vector') return num(g.dist(s.a, s.b));
       if (s.type === 'polygon') return num(s.pts.reduce((sum, p, i) => sum + g.dist(p, s.pts[(i + 1) % s.pts.length]), 0));
       if (s.type === 'circle') return num(2 * Math.PI * s.r);
@@ -232,7 +277,7 @@ export const COMMANDS: Command[] = [
     example: 'A = (0, 0)\nB = (4, 1)\nSegment(A, B)',
     run(a, c) {
       args(a, 2);
-      return shape({ type: 'segment', a: c.point(a[0]), b: c.point(a[1]) });
+      return twoPoints('segment', c, a);
     },
   },
   {
@@ -243,13 +288,19 @@ export const COMMANDS: Command[] = [
     example: 'A = (0, 0)\nB = (3, 1)\na = Line(A, B)\nC = (0, 2)\nLine(C, a)',
     run(a, c) {
       args(a, 2);
-      const p = c.point(a[0]);
       const second = c.val(a[1]);
+      if (second.k === 'shape' && second.s.type === 'space' && second.s.of !== 'point' && second.s.of !== 'polygon') {
+        const p = c.pointAny(a[0]);
+        if (!is3(p)) throw new Error('нельзя смешивать точки листа (x, y) и точки пространства (x, y, z)');
+        const [u, v] = second.s.pts;
+        return space('line', [p, { x: p.x + v.x - u.x, y: p.y + v.y - u.y, z: p.z + v.z - u.z }]);
+      }
       if (second.k === 'shape' && g.isLineLike(second.s)) {
+        const p = c.point(a[0]);
         const l = g.lineParams(second.s);
         return shape({ type: 'line', a: p, b: g.add(p, l.d) });
       }
-      return shape({ type: 'line', a: p, b: c.point(a[1]) });
+      return twoPoints('line', c, a);
     },
   },
   {
@@ -260,7 +311,7 @@ export const COMMANDS: Command[] = [
     example: 'A = (0, 0)\nB = (2, 1)\nRay(A, B)',
     run(a, c) {
       args(a, 2);
-      return shape({ type: 'ray', a: c.point(a[0]), b: c.point(a[1]) });
+      return twoPoints('ray', c, a);
     },
   },
   {
@@ -271,8 +322,11 @@ export const COMMANDS: Command[] = [
     example: 'A = (0, 0)\nB = (3, 2)\nv = Vector(A, B)',
     run(a, c) {
       args(a, 1, 2);
-      if (a.length === 1) return shape({ type: 'vector', a: ORIGIN, b: c.point(a[0]) });
-      return shape({ type: 'vector', a: c.point(a[0]), b: c.point(a[1]) });
+      if (a.length === 1) {
+        const b = c.pointAny(a[0]);
+        return is3(b) ? space('vector', [{ x: 0, y: 0, z: 0 }, b]) : shape({ type: 'vector', a: ORIGIN, b });
+      }
+      return twoPoints('vector', c, a);
     },
   },
   {
@@ -412,7 +466,8 @@ export const COMMANDS: Command[] = [
         }
         return shape({ type: 'polygon', pts });
       }
-      return shape({ type: 'polygon', pts: a.map((e) => c.point(e)) });
+      const pts = pointsOf(c, a);
+      return 'space' in pts ? space('polygon', pts.space) : shape({ type: 'polygon', pts: pts.flat });
     },
   },
   {
@@ -473,6 +528,51 @@ export const COMMANDS: Command[] = [
       args(a, 2, 3);
       if (c.bool(a[0])) return c.val(a[1]);
       return a[2] ? c.val(a[2]) : num(NaN);
+    },
+  },
+
+  // ---------------------------------------------------------------- space
+  {
+    names: ['Точка', 'Point'],
+    group: 'space',
+    forms: ['@(x, y, z)', '@(x, y)'],
+    doc: 'Точка по координатам; то же, что A = (x, y, z). Точка с тремя координатами — в пространстве: чертёж тогда становится эпюром — приложение само рисует её проекции A₁, A₂, линию связи и ось x₁₂. Отрезки, прямые и многоугольники из таких точек тоже рисуются проекциями.',
+    example: 'A = Point(4, 2, 3)',
+    run(a, c) {
+      args(a, 2, 3);
+      const v = a.map((e) => c.num(e));
+      return v.length === 3 ? space('point', [{ x: v[0], y: v[1], z: v[2] }]) : point({ x: v[0], y: v[1] });
+    },
+  },
+  {
+    names: ['Проекции', 'Projections'],
+    group: 'space',
+    forms: ['@(1, 2)', '@(1, 2, 3)'],
+    doc: 'Какие проекции рисовать на эпюре: 1 — горизонтальная (П₁), 2 — фронтальная (П₂), 3 — профильная (П₃). По умолчанию @(1, 2); с профильной появляются оси z и y и постоянная прямая под 45°.',
+    example: 'Projections(1, 2, 3)\nA = (4, 2, 3)',
+    view: true,
+    run(a, c) {
+      if (!a.length) throw new Error('укажите номера плоскостей: 1, 2 или 3');
+      const planes = a.map((e) => Math.round(c.num(e)));
+      if (planes.some((k) => k < 1 || k > 3)) throw new Error('плоскости проекций — 1, 2 и 3');
+      c.scene.view.planes = planes;
+      return NONE;
+    },
+  },
+  {
+    names: ['ОсьX', 'XAxis'],
+    group: 'space',
+    forms: ['@("влево")', '@("вправо")'],
+    doc: 'Куда смотрит ось x на эпюре. По умолчанию влево от точки O, как в учебниках начертательной геометрии.',
+    example: 'XAxis("вправо")\nA = (4, 2, 3)',
+    view: true,
+    run(a, c) {
+      args(a, 1);
+      const dir = c.str(a[0]).trim().toLowerCase();
+      if (['вправо', 'right', 'направо'].includes(dir)) c.scene.view.xRight = true;
+      else if (['влево', 'left', 'налево'].includes(dir)) c.scene.view.xRight = false;
+      else throw new Error('ось x направляется "влево" или "вправо"');
+      return NONE;
     },
   },
 

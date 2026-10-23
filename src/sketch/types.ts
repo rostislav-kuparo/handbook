@@ -5,6 +5,15 @@ export interface Vec {
   y: number;
 }
 
+/** A point in space (descriptive geometry): x along the axis x₁₂, y towards the viewer, z up. */
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export type SpaceKind = 'point' | 'segment' | 'ray' | 'line' | 'vector' | 'polygon';
+
 /** Geometry in world coordinates (y up), as the commands build it. */
 export type Shape =
   | { type: 'point'; p: Vec }
@@ -22,7 +31,9 @@ export type Shape =
   | { type: 'angle'; v: Vec; from: number; sweep: number }
   | { type: 'graph'; f: (x: number) => number; domain: [number, number] | null }
   | { type: 'curve'; f: (t: number) => Vec; t0: number; t1: number }
-  | { type: 'text'; text: string; at: Vec | null };
+  | { type: 'text'; text: string; at: Vec | null }
+  /** A figure in space; the drawing shows it as an epure, by its projections (see epure.ts). */
+  | { type: 'space'; of: SpaceKind; pts: Vec3[] };
 
 export type Val =
   | { k: 'num'; v: number }
@@ -66,6 +77,12 @@ export interface View {
   grid?: boolean;
   /** Length of a y unit / length of an x unit; set when the scale must be fixed. */
   ratio?: number;
+  /** Projection planes of the epure: 1 horizontal, 2 frontal, 3 profile. */
+  planes?: number[];
+  /** The x axis of the epure points right (textbooks point it left). */
+  xRight?: boolean;
+  /** The drawing is an epure: figures in space were turned into projections. */
+  epure?: boolean;
 }
 
 export interface Scene {
@@ -81,6 +98,8 @@ export interface Ctx {
   num(e: Expr): number;
   /** A point: A, (1, 2), Midpoint(A, B). */
   point(e: Expr): Vec;
+  /** A point on the sheet (x, y) or in space (x, y, z). */
+  pointAny(e: Expr): Vec | Vec3;
   /** A shift: a vector or a point taken as one. */
   vec(e: Expr): Vec;
   /** Any figure; functions become graphs. */

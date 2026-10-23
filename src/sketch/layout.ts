@@ -128,7 +128,8 @@ function frameOf(scene: Scene, width: number, fs: number): Frame {
   // Circles must stay round: one scale for both axes, unless only graphs are drawn.
   const equal = scene.view.ratio !== undefined || !graphs.length || items.some((i) => SHAPELY.has(i.shape.type));
   const ratio = scene.view.ratio ?? 1;
-  const pts = items.flatMap((i) => g.extentPoints(i.shape)).filter(finite);
+  // An epure keeps its origin O in view: the axes start there.
+  const pts = [...items.flatMap((i) => g.extentPoints(i.shape)), ...(scene.view.epure ? [{ x: 0, y: 0 }] : [])].filter(finite);
   const bx = extent(pts.map((p) => p.x));
   const by = extent(pts.map((p) => p.y));
 
@@ -361,6 +362,32 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
       label(t.text, fs * 0.58, [{ x: ax - fs * 0.3, y, ax: 1, ay: 0.5 }], mix(base, 2000 + i), undefined, true);
     });
     if (originShown) label('0', fs * 0.58, [{ x: ax - fs * 0.22, y: ay + fs * 0.22, ax: 1, ay: 0 }], mix(base, 23), undefined, true);
+  }
+
+  // ---- the epure: axis x₁₂ (or x, y, z with a profile projection), the origin O
+  if (scene.view.epure) {
+    const profile = (scene.view.planes ?? [1, 2]).includes(3);
+    const sx = scene.view.xRight ? 1 : -1;
+    const look: Look = { seed: mix(base, 41), straight: true, weight: 0.8 };
+    const ox = X(0);
+    const oy = Y(0);
+    const left = rect.x0 - fs * 0.3;
+    const right = rect.x1 + fs * 0.3;
+    // x grows to the left (as in textbooks) unless XAxis("вправо").
+    const xEnd = sx < 0 ? left : right;
+    const yEnd = sx < 0 ? right : left;
+    stroke([{ x: left, y: oy }, { x: right, y: oy }], look, 1);
+    label(profile ? 'x' : 'x_{12}', fs * 0.8, [{ x: xEnd, y: oy - fs * 0.15, ax: sx < 0 ? 0 : 1, ay: 1 }], mix(base, 42), undefined, true);
+    if (profile) {
+      stroke([{ x: ox, y: rect.y0 - fs * 0.3 }, { x: ox, y: rect.y1 + fs * 0.3 }], look, 2);
+      label('z', fs * 0.8, [{ x: ox + fs * 0.2, y: rect.y0 - fs * 0.3, ax: 0, ay: 0 }], mix(base, 43), undefined, true);
+      label('y', fs * 0.8, [{ x: ox + fs * 0.2, y: rect.y1 + fs * 0.3, ax: 0, ay: 1 }], mix(base, 44), undefined, true);
+      label('y', fs * 0.8, [{ x: yEnd, y: oy - fs * 0.15, ax: sx < 0 ? 1 : 0, ay: 1 }], mix(base, 45), undefined, true);
+      // The constant line at 45° carries y from П₁ over to П₃.
+      const reach = Math.max(0, Math.min(Math.abs(yEnd - ox), rect.y1 + fs * 0.3 - oy));
+      stroke([{ x: ox, y: oy }, { x: ox - sx * reach, y: oy + reach }], { ...look, weight: 0.45 }, 3);
+    }
+    label('O', fs * 0.75, aroundPoint({ x: ox, y: oy }, gap * 0.6), mix(base, 46));
   }
 
   // ---- the objects; points go last so they lie on top of their lines

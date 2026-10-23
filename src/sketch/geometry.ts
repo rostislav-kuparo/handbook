@@ -235,6 +235,8 @@ export function mapShape(s: Shape, m: (p: Vec) => Vec, flip: boolean, scale: num
       return { type: 'polygon', pts: s.pts.map(m) };
     case 'text':
       return { type: 'text', text: s.text, at: s.at && m(s.at) };
+    case 'space':
+      throw new Error('повороты, переносы и отражения работают с фигурами на листе, а не в пространстве');
     case 'graph': {
       const f = s.f;
       const [t0, t1] = s.domain ?? range;
@@ -270,6 +272,8 @@ export function extentPoints(s: Shape): Vec[] {
       return [s.v];
     case 'text':
       return s.at ? [s.at] : [];
+    case 'space':
+      return [];
     case 'curve': {
       const out: Vec[] = [];
       for (let i = 0; i <= 200; i++) {

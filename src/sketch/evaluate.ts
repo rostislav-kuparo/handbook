@@ -2,8 +2,9 @@
 // with a mistake is reported and skipped; the rest of the drawing still works.
 import { findCommand, isIgnored, suggestCommand } from './commands';
 import * as g from './geometry';
+import { projectSpace } from './epure';
 import { canon, formatNumber, parseLine, type BinOp, type CmpOp, type Expr, type Statement } from './lang';
-import type { Ctx, Item, Scene, Shape, Val, Vec } from './types';
+import type { Ctx, Item, Scene, Shape, SpaceKind, Val, Vec, Vec3 } from './types';
 
 /** x (or t) used where it has no value: such a definition is a function. */
 class FreeVariable extends Error {
@@ -28,6 +29,8 @@ interface Env {
 const num = (v: number): Val => ({ k: 'num', v });
 const bool = (v: boolean): Val => ({ k: 'bool', v });
 const point = (p: Vec): Val => ({ k: 'shape', s: { type: 'point', p } });
+const point3 = (p: Vec3): Val => ({ k: 'shape', s: { type: 'space', of: 'point', pts: [p] } });
+const len3 = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
 const CONSTANTS: Record<string, Val> = {
   pi: num(Math.PI),
@@ -85,11 +88,31 @@ const MATH: Record<string, (...v: number[]) => number> = {
 };
 const MANY_ARGS = new Set(['log', 'min', 'max']);
 
+/** GeoGebra 3D commands for planes and solids: named in the error instead of «unknown command». */
+const SOLIDS = new Set(
+  [
+    'Plane', 'PerpendicularPlane', 'PlaneBisector', 'Sphere', 'Prism', 'Pyramid', 'Cube', 'Cone', 'Cylinder',
+    'Tetrahedron', 'Octahedron', 'Dodecahedron', 'Icosahedron', 'Net', 'Surface',
+    'Плоскость', 'Сфера', 'Призма', 'Пирамида', 'Куб', 'Конус', 'Цилиндр',
+  ].map((n) => n.toLowerCase()),
+);
+
 function describe(v: Val): string {
   if (v.k === 'num') return 'число';
   if (v.k === 'str') return 'текст';
   if (v.k === 'bool') return 'да/нет';
   if (v.k === 'none') return 'команда без значения';
+  if (v.s.type === 'space') {
+    const space: Record<SpaceKind, string> = {
+      point: 'точка в пространстве',
+      segment: 'отрезок в пространстве',
+      ray: 'луч в пространстве',
+      line: 'прямая в пространстве',
+      vector: 'вектор в пространстве',
+      polygon: 'многоугольник в пространстве',
+    };
+    return space[v.s.of];
+  }
   const names: Record<Shape['type'], string> = {
     point: 'точка',
     segment: 'отрезок',
@@ -103,6 +126,7 @@ function describe(v: Val): string {
     graph: 'график',
     curve: 'кривая',
     text: 'надпись',
+    space: 'фигура в пространстве',
   };
   return names[v.s.type];
 }
@@ -114,6 +138,8 @@ function toNum(v: Val): number {
     // As in GeoGebra: a segment counts as its length, an angle as its size.
     if (v.s.type === 'segment' || v.s.type === 'vector') return g.dist(v.s.a, v.s.b);
     if (v.s.type === 'angle') return Math.abs(v.s.sweep);
+    // The true length of a segment in space.
+    if (v.s.type === 'space' && (v.s.of === 'segment' || v.s.of === 'vector')) return len3(v.s.pts[0], v.s.pts[1]);
   }
   throw new Error(`здесь нужно число, а не ${describe(v)}`);
 }
@@ -126,12 +152,46 @@ function vecOf(v: Val): Vec | null {
   return null;
 }
 
+/** Points and vectors in space as coordinates. */
+function vec3Of(v: Val): Vec3 | null {
+  if (v.k !== 'shape' || v.s.type !== 'space') return null;
+  const [a, b] = v.s.pts;
+  if (v.s.of === 'point') return a;
+  if (v.s.of === 'vector') return { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  return null;
+}
+
+const isVector3 = (v: Val) => v.k === 'shape' && v.s.type === 'space' && v.s.of === 'vector';
+const like3 = (v: Val, p: Vec3): Val =>
+  isVector3(v) ? { k: 'shape', s: { type: 'space', of: 'vector', pts: [{ x: 0, y: 0, z: 0 }, p] } } : point3(p);
+
+function arithmetic3(op: BinOp, a: Val, b: Val): Val {
+  const pa = vec3Of(a);
+  const pb = vec3Of(b);
+  if ((pa && vecOf(b)) || (pb && vecOf(a))) throw new Error('точку пространства (x, y, z) нельзя смешивать с точкой листа (x, y)');
+  const scale = (p: Vec3, k: number): Vec3 => ({ x: p.x * k, y: p.y * k, z: p.z * k });
+  if (op === '+' || op === '-') {
+    if (!pa || !pb) throw new Error('к точке можно прибавить только точку или вектор');
+    const k = op === '+' ? 1 : -1;
+    const r = { x: pa.x + k * pb.x, y: pa.y + k * pb.y, z: pa.z + k * pb.z };
+    return isVector3(a) && isVector3(b) ? like3(a, r) : point3(r);
+  }
+  if (op === '*') {
+    if (pa && pb) return num(pa.x * pb.x + pa.y * pb.y + pa.z * pb.z);
+    if (pa) return like3(a, scale(pa, toNum(b)));
+    return like3(b, scale(pb!, toNum(a)));
+  }
+  if (op === '/' && pa && !pb) return like3(a, scale(pa, 1 / toNum(b)));
+  throw new Error('так точки и векторы не считаются');
+}
+
 /** The result keeps the kind of its operand: a point stays a point, a vector a vector. */
 function like(v: Val, p: Vec): Val {
   return v.k === 'shape' && v.s.type === 'vector' ? { k: 'shape', s: { type: 'vector', a: { x: 0, y: 0 }, b: p } } : point(p);
 }
 
 function arithmetic(op: BinOp, a: Val, b: Val): Val {
+  if (vec3Of(a) || vec3Of(b)) return arithmetic3(op, a, b);
   const pa = vecOf(a);
   const pb = vecOf(b);
   if (!pa && !pb) {
@@ -204,8 +264,11 @@ function call(e: Extract<Expr, { t: 'call' }>, env: Env): Val {
       return num(entry.val.s.f(toNum(evalExpr(e.args[0], env))));
     }
   }
-  if ((key === 'x' || key === 'y') && e.args.length === 1) {
+  if ((key === 'x' || key === 'y' || key === 'z') && e.args.length === 1) {
     const a = evalExpr(e.args[0], env);
+    const s3 = vec3Of(a);
+    if (s3) return num(s3[key]);
+    if (key === 'z') throw new Error('z есть только у точки в пространстве (x, y, z)');
     const p = vecOf(a);
     if (p) return num(key === 'x' ? p.x : p.y);
     // x(x + 1) is x·(x + 1)
@@ -220,6 +283,9 @@ function call(e: Extract<Expr, { t: 'call' }>, env: Env): Val {
   const cmd = findCommand(e.name);
   if (cmd) return cmd.run(e.args, ctxOf(env));
   if (isIgnored(e.name)) return { k: 'none' };
+  if (SOLIDS.has(lower)) {
+    throw new Error(`«${e.name}» — команда GeoGebra 3D: плоскости и тела на эпюре пока не рисуются. Плоскость задайте треугольником: Polygon(A, B, C)`);
+  }
   const near = suggestCommand(e.name);
   throw new Error(`не знаю команду «${e.name}»${near ? `. Может быть, ${near}?` : ''}`);
 }
@@ -232,16 +298,23 @@ function evalExpr(e: Expr, env: Env): Val {
       return { k: 'str', v: e.v };
     case 'name':
       return lookup(e.name, env);
-    case 'tuple':
-      if (e.items.length !== 2) throw new Error('у точки две координаты: (x, y)');
-      return point({ x: toNum(evalExpr(e.items[0], env)), y: toNum(evalExpr(e.items[1], env)) });
+    case 'tuple': {
+      const c = e.items.map((it) => toNum(evalExpr(it, env)));
+      if (c.length === 2) return point({ x: c[0], y: c[1] });
+      if (c.length === 3) return point3({ x: c[0], y: c[1], z: c[2] });
+      throw new Error('у точки две координаты (x, y) на листе или три (x, y, z) в пространстве');
+    }
     case 'neg': {
       const a = evalExpr(e.a, env);
+      const s3 = vec3Of(a);
+      if (s3) return like3(a, { x: -s3.x, y: -s3.y, z: -s3.z });
       const p = vecOf(a);
       return p ? like(a, g.mul(p, -1)) : num(-toNum(a));
     }
     case 'abs': {
       const a = evalExpr(e.a, env);
+      const s3 = vec3Of(a);
+      if (s3) return num(Math.hypot(s3.x, s3.y, s3.z));
       const p = vecOf(a);
       return num(p ? g.len(p) : Math.abs(toNum(a)));
     }
@@ -309,6 +382,13 @@ function ctxOf(env: Env): Ctx {
     point: (e) => {
       const v = val(e);
       if (v.k === 'shape' && v.s.type === 'point') return v.s.p;
+      if (vec3Of(v)) throw new Error('эта команда работает с точками на листе (x, y), а не в пространстве');
+      throw new Error(`здесь нужна точка, а не ${describe(v)}`);
+    },
+    pointAny: (e) => {
+      const v = val(e);
+      if (v.k === 'shape' && v.s.type === 'point') return v.s.p;
+      if (v.k === 'shape' && v.s.type === 'space' && v.s.of === 'point') return v.s.pts[0];
       throw new Error(`здесь нужна точка, а не ${describe(v)}`);
     },
     vec: (e) => {
@@ -434,7 +514,7 @@ function run(code: string): Scene {
         shape,
         name: name && canon(name),
         label: name,
-        showLabel: (!!name && shape.type === 'point') || shape.type === 'angle',
+        showLabel: (!!name && (shape.type === 'point' || (shape.type === 'space' && shape.of === 'point'))) || shape.type === 'angle',
         lineStyle: 0,
         thickness: 5,
         filling: 0,
@@ -452,6 +532,8 @@ function run(code: string): Scene {
     }
   }
   scene.errors.sort((a, b) => a.line - b.line);
+  // Figures in space are drawn as an epure: their projections, linking lines, the axis.
+  projectSpace(scene);
   return scene;
 }
 
