@@ -43,7 +43,12 @@ export function RenderSettings() {
             ))}
           </select>
         </label>
-        <Check k="connect" label="Слитное письмо (соединять по точкам входа/выхода, на двух высотах)" style={style} />
+        <Check k="connect" label="Слитное письмо (соединять по точкам входа/выхода)" style={style} />
+        <Check
+          k="bridge"
+          label="Соединять в рендере живым штрихом: буквы не гнутся, связка идёт от выхода к началу следующей, даже если она написана без входа"
+          style={style}
+        />
         <Check k="kerning" label="Оптический кернинг (Г, Т, У, точки — ближе)" style={style} />
         <Check k="pairs" label="Использовать записанные пары букв (ст, но…)" style={style} />
         <button className="btn small" onClick={() => updateStyle({ seed: style.seed + 1 })} title="Другой выбор вариантов букв во всём тексте">

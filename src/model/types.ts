@@ -52,6 +52,8 @@ export interface Style {
   letterSpacing: number;
   wordSpacing: number;
   connect: boolean;
+  /** Rendering: join letters by a connecting stroke, also letters written without a lead-in. */
+  bridge: boolean;
   /** Generate new variants from the learned shape model. */
   interpolate: boolean;
   /** 0..2: how far generated variants may stray from the written ones. */
@@ -77,6 +79,7 @@ export const DEFAULT_STYLE: Style = {
   letterSpacing: 45,
   wordSpacing: 280,
   connect: true,
+  bridge: true,
   interpolate: true,
   fantasy: 1,
   kerning: true,

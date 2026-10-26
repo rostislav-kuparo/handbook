@@ -20,15 +20,18 @@ export interface Drawing {
 export const GRAPHITE = '#4d4f56';
 
 /**
- * The handwriting's own pen, at this letter size. A pencil draws a thinner,
- * shakier line whose weight breathes more with the pressure.
+ * The handwriting's own pen, at this letter size, as the drawing asks for it:
+ * a pencil draws a thinner, shakier line whose weight breathes more; the
+ * drawing's sliders scale the thickness, the shaking, the breathing and how
+ * far lines run past their ends.
  */
-export function penFor(style: Style, fontSize: number, tool: DrawPen['tool'] = 'pen'): Pen {
-  const width = Math.max(0.8, (style.weight * fontSize) / 1000);
-  if (tool === 'pencil') {
-    return { width: Math.max(0.7, width * 0.72), pressure: Math.min(1, style.pressure + 0.3), jitter: Math.min(1, style.jitter * 1.2 + 0.15) };
-  }
-  return { width, pressure: style.pressure, jitter: style.jitter };
+export function penFor(style: Style, fontSize: number, draw?: Partial<DrawPen>): Pen {
+  const base = Math.max(0.8, (style.weight * fontSize) / 1000);
+  const pencil = draw?.tool === 'pencil';
+  const width = (pencil ? Math.max(0.7, base * 0.72) : base) * (draw?.weight ?? 1);
+  const pressure = (pencil ? Math.min(1, style.pressure + 0.3) : style.pressure) * (draw?.pressure ?? 1);
+  const jitter = pencil ? Math.min(1, style.jitter * 1.2 + 0.15) : style.jitter;
+  return { width: Math.max(0.4, width), pressure: Math.min(pressure, 1.6), jitter, wobble: draw?.wobble ?? 1, overshoot: draw?.overshoot ?? 1 };
 }
 
 /**
@@ -47,7 +50,7 @@ const layouts = new Map<string, SketchLayout>();
 
 /** Lines and label places of a drawing `width` px wide (cached). */
 export function sketchLayout(code: string, width: number, fontSize: number, pen: Pen): SketchLayout {
-  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${code}`;
+  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${code}`;
   const hit = layouts.get(key);
   if (hit) return hit;
   const layout = layoutSketch(compileSketch(code), width, fontSize, pen);

@@ -504,7 +504,8 @@ kbd {
 }
 .html-block:hover .html-block-head,
 .html-block.selected .html-block-head,
-.html-block[data-panel] .html-block-head {
+.html-block[data-panel] .html-block-head,
+.html-block:has(.pen-menu) .html-block-head {
   opacity: 1;
 }
 .grip {
@@ -584,6 +585,31 @@ kbd {
 .html-block-tools .segmented button.on {
   background: var(--accent);
   color: var(--accent-text);
+}
+.draw-pen-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.draw-pen-sliders label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.draw-pen-sliders label > span {
+  display: flex;
+  justify-content: space-between;
+}
+.draw-pen-sliders output {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.draw-pen-sliders input[type='range'] {
+  width: 100%;
+}
+.draw-pen-sliders .link-btn {
+  align-self: flex-start;
 }
 .page-menu-drawings {
   display: flex;
@@ -1520,6 +1546,8 @@ line.guide.dashed {
 .page-menu {
   width: 270px;
   min-width: 0 !important;
+  max-height: min(80vh, 760px);
+  overflow: auto;
   padding: 10px !important;
   display: flex;
   flex-direction: column;

@@ -17,17 +17,37 @@ export interface DrawPen {
   color: string | null;
   /** Labels in the text's pen even when the lines are in pencil. */
   labelsInPen: boolean;
+  /** How crooked the lines are: 0 — as with a ruler, 1 — a steady hand, up to 2.5. */
+  wobble: number;
+  /** Line thickness factor (1 — the handwriting's pen). */
+  weight: number;
+  /** How much the thickness breathes along a line: 0 — even, 1 — as the pen, up to 2. */
+  pressure: number;
+  /** How far lines run past their ends: 0 — exactly to the point, 1 — a little, up to 2. */
+  overshoot: number;
 }
 
-export const DEFAULT_DRAW_PEN: DrawPen = { tool: 'pen', color: null, labelsInPen: false };
+export const DEFAULT_DRAW_PEN: DrawPen = { tool: 'pen', color: null, labelsInPen: false, wobble: 1, weight: 1, pressure: 1, overshoot: 1 };
+
+/** Limits of the drawing pen's sliders. */
+export const DRAW_PEN_RANGES = { wobble: [0, 2.5], weight: [0.4, 2.5], pressure: [0, 2], overshoot: [0, 2] } as const;
 
 /** A drawing's own pen over the document's: what the drawing does not set comes from `base`. */
 export function drawPenOf(base: DrawPen, own: unknown): DrawPen {
   const o = (own && typeof own === 'object' ? own : {}) as Partial<DrawPen>;
+  const num = (k: keyof typeof DRAW_PEN_RANGES) => {
+    const v = o[k];
+    const [lo, hi] = DRAW_PEN_RANGES[k];
+    return typeof v === 'number' && Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : base[k];
+  };
   return {
     tool: o.tool === 'pen' || o.tool === 'pencil' ? o.tool : base.tool,
     color: 'color' in o && (o.color === null || typeof o.color === 'string') ? o.color : base.color,
     labelsInPen: typeof o.labelsInPen === 'boolean' ? o.labelsInPen : base.labelsInPen,
+    wobble: num('wobble'),
+    weight: num('weight'),
+    pressure: num('pressure'),
+    overshoot: num('overshoot'),
   };
 }
 

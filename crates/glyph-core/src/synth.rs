@@ -7,6 +7,8 @@
 //! 3. `adapt_entry` – rewrite the start of a letter so it joins a neighbour that
 //!    leaves at the other height (after "о" the next letter starts at the top).
 //!    `stretch_entry` lengthens the lead-in when two joined letters would collide.
+//!    The ink renderer does not bend letters at all: `connector` draws the
+//!    stroke a hand makes from one letter's real exit to the next one's start.
 //! 4. `place`      – compute the glyph origin and advance so that the exit of one
 //!    letter lands exactly on the entry of the next one.
 
@@ -70,6 +72,11 @@ pub enum Position {
     Medial,
     /// The last letter of a word (before a space, punctuation or the end).
     Final,
+    /// Inside a word, in ink: letters are joined by connecting strokes, so a
+    /// variant written without a lead-in fits as well as one written with it.
+    Inside,
+    /// The last letter of a word, in ink (joined by a connecting stroke).
+    End,
     /// A word of one letter (і, з, у, а): joins nothing on either side.
     Single,
     /// Abbreviations (СССР, т.е.): a stand-alone letter that joins nothing.
@@ -84,13 +91,15 @@ impl Position {
             Position::Initial => &[|t| t.entry.is_none()],
             Position::Medial => &[|t| t.entry.is_some() && t.exit.is_some(), |t| t.entry.is_some()],
             Position::Final => &[|t| t.entry.is_some() && t.exit.is_none(), |t| t.entry.is_some()],
+            Position::Inside => &[|t| t.exit.is_some()],
+            Position::End => &[|t| t.exit.is_none()],
             Position::Single | Position::Isolated => &[|t| t.entry.is_none() && t.exit.is_none(), |t| t.entry.is_none()],
         }
     }
 
     /// Nothing follows this letter in its word: no tail towards a next letter.
     pub fn ends_word(self) -> bool {
-        matches!(self, Position::Final | Position::Single | Position::Isolated)
+        matches!(self, Position::Final | Position::End | Position::Single | Position::Isolated)
     }
 
     /// The first preference some sample satisfies (or "anything").
@@ -151,10 +160,13 @@ pub fn prepare(sample: &Sample) -> Prepared {
     // A join only works on the outer edge: the pen arrives from the left and
     // leaves to the right. A "connecting" point in the middle of the letter
     // would make it hang over its neighbour, so it is ignored.
+    // Nor can a letter join from the top of an ascender or the bottom of a tail
+    // (a cut in «Напиши фразу» can land there).
     let b = strokes_bbox(&strokes);
     let reach = (0.3 * b.width()).max(60.0);
-    let entry = sample.entry.map(|a| Anchor { connect: a.connect && !b.is_empty() && a.x <= b.x_min + reach, ..a });
-    let exit = sample.exit.map(|a| Anchor { connect: a.connect && !b.is_empty() && a.x >= b.x_max - reach, ..a });
+    let height = |a: &Anchor| a.y > -0.3 * X_HEIGHT && a.y < 1.3 * X_HEIGHT;
+    let entry = sample.entry.map(|a| Anchor { connect: a.connect && !b.is_empty() && a.x <= b.x_min + reach && height(&a), ..a });
+    let exit = sample.exit.map(|a| Anchor { connect: a.connect && !b.is_empty() && a.x >= b.x_max - reach && height(&a), ..a });
     Prepared { strokes, entry, exit }
 }
 
@@ -217,6 +229,11 @@ pub fn join_lines(samples: &[&Prepared]) -> Joins {
 /// `slot = Some(k)` reuses recorded sample `k` when it exists (so every
 /// recorded variant shows up in the font) and samples the learned model for
 /// the rest; `slot = None` makes a fresh random instance (ink rendering).
+///
+/// `snap`: bend the joining ends onto the two join lines, so that any two
+/// letters meet (the font needs that). Without it the letter stays as it was
+/// written and its entry and exit are where its strokes really end; the ink
+/// renderer joins such letters with a connecting stroke instead.
 #[allow(clippy::too_many_arguments)]
 pub fn synthesize(
     samples: &[Prepared],
@@ -226,6 +243,7 @@ pub fn synthesize(
     rng: &mut Rng,
     style: &Style,
     joins: &Joins,
+    snap: bool,
 ) -> GlyphInk {
     if samples.is_empty() {
         return GlyphInk { strokes: vec![], entry: None, exit: None };
@@ -286,7 +304,34 @@ pub fn synthesize(
     let mut out_exit = None;
     let mut used = None;
     // Isolated letters keep their strokes but never join: spacing comes from their ink.
-    if style.connect && position != Position::Isolated {
+    if !snap && style.connect && position != Position::Isolated {
+        let at = |strokes: &[Stroke], end: (usize, bool)| {
+            let s = &strokes[end.0];
+            if end.1 { s[0] } else { s[s.len() - 1] }
+        };
+        // As far from the user's own join line as a snapped join may bend; above the high
+        // line only a little (the top of an ascender is not a join).
+        let near = |p: Pt, level: Level| {
+            joins.y(level).is_none_or(|ty| p.y - ty <= if level == Level::High { 120.0 } else { 220.0 } && ty - p.y <= 220.0)
+        };
+        if let Some((x, y, level)) = entry {
+            if let Some(end) = nearest_end(&strokes, x, y, None) {
+                let p = at(&strokes, end);
+                if near(p, level) {
+                    out_entry = Some(Join { x: p.x, y: p.y, level });
+                    used = Some(end);
+                }
+            }
+        }
+        if let (false, Some((x, y, level))) = (position.ends_word(), exit) {
+            if let Some(end) = nearest_end(&strokes, x, y, used) {
+                let p = at(&strokes, end);
+                if near(p, level) {
+                    out_exit = Some(Join { x: p.x, y: p.y, level });
+                }
+            }
+        }
+    } else if style.connect && position != Position::Isolated {
         if let Some((x, y, level)) = entry {
             if let (Some(ty), Some(end)) = (joins.y(level), nearest_end(&strokes, x, y, None)) {
                 if let Some((px, py)) = warp_end(&mut strokes[end.0], end.1, ty, 220.0) {
@@ -306,7 +351,7 @@ pub fn synthesize(
     // The end of a word: the joining tail has nowhere to go, cut it short.
     if let (true, Some((x, y, _))) = (position.ends_word(), exit) {
         if let Some(end) = nearest_end(&strokes, x, y, used) {
-            trim_tail(&mut strokes[end.0], end.1);
+            trim_tail(&mut strokes, end.0, end.1);
         }
     }
     GlyphInk { strokes, entry: out_entry, exit: out_exit }
@@ -330,22 +375,7 @@ pub fn adapt_entry(ink: &mut GlyphInk, target: Level, joins: &Joins) -> bool {
     }
     match target {
         Level::High => {
-            let len = stroke_length(&s);
-            let mut acc = 0.0;
-            let mut cut = None;
-            for i in 1..s.len() {
-                acc += s[i - 1].dist(&s[i]);
-                if acc > len * 0.6 {
-                    break;
-                }
-                if s[i].y >= ty - 4.0 {
-                    cut = Some(i);
-                    break;
-                }
-            }
-            if let Some(i) = cut {
-                s.drain(..i);
-            }
+            trim_lead_in(&mut s, ty, 0.6);
             if s.len() < 2 || warp_end(&mut s, true, ty, 400.0).is_none() {
                 return false;
             }
@@ -375,17 +405,41 @@ pub fn adapt_entry(ink: &mut GlyphInk, target: Level, joins: &Joins) -> bool {
     true
 }
 
-/// Cut a joining tail short: the last run of the stroke that heads the way
-/// the exit points (up and out of «а», across from the top of «о») is cut
-/// back to a small flick, and the pen lifts there. `at_start`: the tail is at
-/// the start of the stroke.
-pub fn trim_tail(s: &mut Stroke, at_start: bool) {
-    if s.len() < 8 {
+/// Cut a lead-in that rises from below where it first reaches height `y`
+/// (within the first `share` of the stroke): the pen arrives there from a
+/// letter that leaves high, as after «о». The stroke starts at index 0.
+pub fn trim_lead_in(s: &mut Stroke, y: f64, share: f64) -> bool {
+    let len = stroke_length(s);
+    let mut acc = 0.0;
+    for i in 1..s.len() {
+        acc += s[i - 1].dist(&s[i]);
+        if acc > len * share {
+            return false;
+        }
+        if s[i].y >= y - 4.0 {
+            if s.len() - i >= 2 {
+                s.drain(..i);
+                return true;
+            }
+            return false;
+        }
+    }
+    false
+}
+
+/// Cut a joining tail short: the part of the exit stroke that runs out past
+/// the rest of the letter, heading the way the exit points (up and out of
+/// «а», across from the top of «о»), is cut back to a small flick, and the
+/// pen lifts there. The letter itself is never touched: nothing within its
+/// own width is cut. `at_start`: the tail is at the start of stroke `si`.
+pub fn trim_tail(strokes: &mut [Stroke], si: usize, at_start: bool) {
+    if strokes[si].len() < 8 {
         return;
     }
     if at_start {
-        s.reverse();
+        strokes[si].reverse();
     }
+    let s = &strokes[si];
     let n = s.len();
     let dir = |a: &Pt, b: &Pt| {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
@@ -394,40 +448,98 @@ pub fn trim_tail(s: &mut Stroke, at_start: bool) {
     };
     let k = 3;
     let out = dir(&s[n - 1 - k], &s[n - 1]);
-    // Walk back while the stroke still heads roughly the same way (within ~55°).
-    let mut cut = n - 1 - k;
-    while cut > k {
-        let d = dir(&s[cut - k], &s[cut]);
+    // The tail: walk back while the stroke still heads roughly the same way (within ~55°).
+    let mut run = n - 1 - k;
+    while run > k {
+        let d = dir(&s[run - k], &s[run]);
         if d.0 * out.0 + d.1 * out.1 < 0.57 {
             break;
         }
-        cut -= 1;
+        run -= 1;
     }
-    let total = stroke_length(s);
-    let tail = stroke_length(&s[cut..]);
-    if tail >= 45.0 {
-        // Never more than half the stroke; keep a short flick of the tail.
-        let tail = tail.min(total * 0.5);
-        let keep = total - tail + (tail * 0.3).min(45.0);
-        let mut acc = 0.0;
-        let mut end = n;
-        for i in 1..n {
-            acc += s[i - 1].dist(&s[i]);
-            if acc > keep {
-                end = i;
-                break;
+    // How far the rest of the letter reaches the way the tail goes.
+    let sign = if out.0 >= 0.0 { 1.0 } else { -1.0 };
+    let reach = |p: &Pt| p.x * sign;
+    let body = strokes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, st)| st.iter().enumerate().filter(move |(j, _)| i != si || *j < run).map(|(_, p)| p))
+        .map(reach)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let s = &mut strokes[si];
+    if body.is_finite() {
+        // Keep the tail up to a short flick past the letter's own edge.
+        if let Some(cut) = (run..n).find(|&i| reach(&s[i]) > body + 30.0) {
+            if n - cut > 2 {
+                s.truncate(cut.max(2));
+                let m = s.len();
+                for (j, p) in s.iter_mut().rev().take(5.min(m - 1)).enumerate() {
+                    p.p *= 0.55 + 0.09 * j as f64;
+                }
             }
-        }
-        s.truncate(end.max(2));
-        // The pen lifts off where the stroke now ends.
-        let m = s.len();
-        for (j, p) in s.iter_mut().rev().take(5.min(m - 1)).enumerate() {
-            p.p *= 0.55 + 0.09 * j as f64;
         }
     }
     if at_start {
         s.reverse();
     }
+}
+
+/// Unit direction in which the pen leaves stroke `s` at one of its ends
+/// (at the start: backwards out of the stroke).
+pub fn outward(s: &Stroke, at_start: bool) -> (f64, f64) {
+    let k = 3.min(s.len() - 1);
+    let (a, b) = if at_start { (s[k], s[0]) } else { (s[s.len() - 1 - k], s[s.len() - 1]) };
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let l = (dx * dx + dy * dy).sqrt().max(1e-9);
+    (dx / l, dy / l)
+}
+
+/// The stroke a hand draws from one letter's exit `from` to the next one's
+/// start `to`: a curve leaving along `out_dir` and arriving along `in_dir`,
+/// always moving on to the right. `over`: the letter starts inside its own
+/// width (the top of the bowl of «а», «d»), so the pen rises early and runs in
+/// along the top of the bowl. The returned points end just before `to`.
+pub fn connector(from: Pt, out_dir: (f64, f64), to: Pt, in_dir: (f64, f64), over: bool) -> Stroke {
+    let len = from.dist(&to);
+    if len < 1.0 {
+        return vec![];
+    }
+    let onward = |(x, y): (f64, f64)| {
+        let x = x.max(0.25);
+        let l = (x * x + y * y).sqrt();
+        (x / l, y / l)
+    };
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let (c1, c2) = if over {
+        ((from.x + 0.2 * dx, from.y + 0.85 * dy), (to.x - 0.5 * dx, to.y + 0.03 * dx.abs()))
+    } else {
+        let (o, i) = (onward(out_dir), onward(in_dir));
+        let k = 0.4 * len;
+        ((from.x + o.0 * k, from.y + o.1 * k), (to.x - i.0 * k, to.y - i.1 * k))
+    };
+    let n = ((len * 1.3) / 5.0).ceil().max(2.0) as usize;
+    (0..n)
+        .map(|j| {
+            let t = j as f64 / n as f64;
+            let u = 1.0 - t;
+            let x = u * u * u * from.x + 3.0 * u * u * t * c1.0 + 3.0 * u * t * t * c2.0 + t * t * t * to.x;
+            let y = u * u * u * from.y + 3.0 * u * u * t * c1.1 + 3.0 * u * t * t * c2.1 + t * t * t * to.y;
+            Pt::new(x, y, from.p + (to.p - from.p) * t)
+        })
+        .collect()
+}
+
+/// The stroke end nearest to (x, y), if any is close (dots excluded).
+pub fn end_at(strokes: &[Stroke], x: f64, y: f64) -> Option<(usize, bool)> {
+    nearest_end(strokes, x, y, None)
+}
+
+/// The stroke a hand starts a letter with when it comes from the previous
+/// one: the first real stroke in writing order, not a dot or a little dash
+/// written first (the dot of «і», the bar of «ї» put on before the stem).
+pub fn lead_stroke(strokes: &[Stroke]) -> Option<usize> {
+    let longest = strokes.iter().map(|s| stroke_length(s)).fold(0.0, f64::max);
+    strokes.iter().position(|s| s.len() >= 2 && stroke_length(s) >= DOT_LENGTH.max(0.35 * longest))
 }
 
 /// Move a joining letter `by` units to the right of where its entry was, by
@@ -571,7 +683,7 @@ mod tests {
         let style = Style::default();
         let joins = Joins { low: Some(60.0), high: Some(420.0) };
         let model = ShapeModel::fit(std::slice::from_ref(&p));
-        let ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(7), &style, &joins);
+        let ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(7), &style, &joins, true);
         let e = ink.entry.expect("entry");
         let x = ink.exit.expect("exit");
         assert!((e.y - 60.0).abs() < 1e-6 && (x.y - 60.0).abs() < 1e-6);
@@ -616,7 +728,7 @@ mod tests {
         let joins = Joins { low: Some(40.0), high: Some(430.0) };
         let p = prepare(&s);
         let model = ShapeModel::fit(std::slice::from_ref(&p));
-        let ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(1), &Style::default(), &joins);
+        let ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(1), &Style::default(), &joins, true);
         let x = ink.exit.expect("exit");
         assert_eq!(x.level, Level::High);
         assert!((x.y - 430.0).abs() < 1e-6);
@@ -642,8 +754,8 @@ mod tests {
         let joins = Joins { low: Some(60.0), high: Some(420.0) };
         let model = ShapeModel::fit(std::slice::from_ref(&p));
         let style = Style { jitter: 0.0, ..Style::default() };
-        let mid = synthesize(std::slice::from_ref(&p), &model, Some(0), Position::Medial, &mut Rng::new(1), &style, &joins);
-        let end = synthesize(std::slice::from_ref(&p), &model, Some(0), Position::Final, &mut Rng::new(1), &style, &joins);
+        let mid = synthesize(std::slice::from_ref(&p), &model, Some(0), Position::Medial, &mut Rng::new(1), &style, &joins, true);
+        let end = synthesize(std::slice::from_ref(&p), &model, Some(0), Position::Final, &mut Rng::new(1), &style, &joins, true);
         assert!(mid.exit.is_some(), "in the middle the tail joins");
         assert!(end.exit.is_none(), "at the end of a word there is nothing to join");
         let right = |ink: &GlyphInk| strokes_bbox(&ink.strokes).x_max;
@@ -667,7 +779,7 @@ mod tests {
         let p = prepare(&s);
         let joins = Joins { low: Some(60.0), high: Some(420.0) };
         let model = ShapeModel::fit(std::slice::from_ref(&p));
-        let ink = synthesize(&[p], &model, Some(0), Position::Medial, &mut Rng::new(1), &Style::default(), &joins);
+        let ink = synthesize(&[p], &model, Some(0), Position::Medial, &mut Rng::new(1), &Style::default(), &joins, true);
         assert!(ink.exit.is_none(), "the dot is not bent down to the join line");
     }
 
@@ -679,7 +791,7 @@ mod tests {
         let joins = Joins { low: Some(60.0), high: Some(420.0) };
         let model = ShapeModel::fit(std::slice::from_ref(&p));
         let style = Style { jitter: 0.0, ..Style::default() };
-        let mut ink = synthesize(&[p], &model, Some(0), Position::Medial, &mut Rng::new(1), &style, &joins);
+        let mut ink = synthesize(&[p], &model, Some(0), Position::Medial, &mut Rng::new(1), &style, &joins, true);
         let before = place(&ink, &strokes_bbox(&ink.strokes), &style);
         let body = strokes_bbox(&ink.strokes).x_max;
         assert!(stretch_entry(&mut ink, 120.0));
@@ -699,7 +811,7 @@ mod tests {
         let p = prepare(&s);
         let model = ShapeModel::fit(std::slice::from_ref(&p));
         let style = Style { jitter: 0.0, ..Style::default() };
-        let mut ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(1), &style, &joins);
+        let mut ink = synthesize(&[p], &model, Some(0), Position::Any, &mut Rng::new(1), &style, &joins, true);
         let before = ink.entry.unwrap();
         assert!(adapt_entry(&mut ink, Level::High, &joins));
         let after = ink.entry.unwrap();

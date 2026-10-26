@@ -113,7 +113,7 @@ export async function documentPages(o: PageExport): Promise<string[]> {
   /** A drawing in the user's hand, as on screen: its pen or pencil, the document's ink. */
   const sketchAt = async (a: Record<string, unknown>, x: number, y: number, width: number) => {
     const draw = drawPenOf(o.drawPen, a.pen);
-    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, penFor(getHandwriting().style, fontSize, draw.tool)));
+    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, penFor(getHandwriting().style, fontSize, draw)));
     return `<svg x="${x}" y="${y}" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, o.ink, draw)}</svg>`;
   };
   const floats = placeFloats(nodes, geo, titleH);

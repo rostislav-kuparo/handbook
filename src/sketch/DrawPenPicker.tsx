@@ -1,4 +1,4 @@
-import type { DrawPen } from '../editor/page';
+import { DEFAULT_DRAW_PEN, DRAW_PEN_RANGES, type DrawPen } from '../editor/page';
 import { GRAPHITE } from './render';
 
 /** Colours for drawings; null is «auto»: the text's ink for a pen, graphite for a pencil. */
@@ -10,6 +10,14 @@ const COLORS: { name: string; color: string }[] = [
   { name: 'Зелёный', color: '#2e6b3a' },
 ];
 
+/** The line sliders: what each does, at its two ends. */
+const SLIDERS: { key: keyof typeof DRAW_PEN_RANGES; label: string; hint: string; unit?: string }[] = [
+  { key: 'wobble', label: 'Кривизна линий', hint: '0 — как по линейке, 1 — твёрдая рука, больше — совсем от руки' },
+  { key: 'weight', label: 'Толщина', hint: 'относительно пера почерка', unit: '×' },
+  { key: 'pressure', label: 'Нажим', hint: 'насколько толщина «дышит» вдоль линии: 0 — ровная' },
+  { key: 'overshoot', label: 'Заход за концы', hint: '0 — линия ровно до точки, больше — дальше за неё' },
+];
+
 interface Props {
   value: DrawPen;
   onChange: (next: DrawPen) => void;
@@ -17,7 +25,7 @@ interface Props {
   textInk: string;
 }
 
-/** Pen or pencil, its colour, and whether labels stay in the text's pen. */
+/** Pen or pencil, its colour, whether labels stay in the text's pen, and how the lines are drawn. */
 export function DrawPenPicker({ value, onChange, textInk }: Props) {
   const pencil = value.tool === 'pencil';
   const known = value.color === null || COLORS.some((c) => c.color === value.color);
@@ -59,6 +67,39 @@ export function DrawPenPicker({ value, onChange, textInk }: Props) {
           Подписи — ручкой, как текст
         </label>
       )}
+      <div className="draw-pen-sliders">
+        {SLIDERS.map((s) => {
+          const [min, max] = DRAW_PEN_RANGES[s.key];
+          return (
+            <label key={s.key} title={s.hint}>
+              <span>
+                {s.label}{' '}
+                <output>
+                  {s.unit ?? ''}
+                  {value[s.key].toFixed(2).replace(/\.?0+$/, '')}
+                </output>
+              </span>
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={0.05}
+                value={value[s.key]}
+                onChange={(e) => onChange({ ...value, [s.key]: Number(e.target.value) })}
+              />
+            </label>
+          );
+        })}
+        {SLIDERS.some((s) => value[s.key] !== DEFAULT_DRAW_PEN[s.key]) && (
+          <button
+            className="link-btn small"
+            onClick={() => onChange({ ...value, wobble: 1, weight: 1, pressure: 1, overshoot: 1 })}
+            title="Кривизна, толщина, нажим и заход — как у пера почерка"
+          >
+            Сбросить линии
+          </button>
+        )}
+      </div>
     </div>
   );
 }

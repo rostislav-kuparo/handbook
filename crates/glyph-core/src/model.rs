@@ -100,6 +100,10 @@ pub struct Style {
     pub word_spacing: f64,
     /// Join letters at their entry/exit anchors.
     pub connect: bool,
+    /// Ink rendering: join the letters by a connecting stroke from the real exit
+    /// to the real start of the next letter, also when it was written without a
+    /// lead-in (instead of bending both onto common join lines).
+    pub bridge: bool,
     /// Generate new variants from the learned shape model.
     pub interpolate: bool,
     /// 0..2, how far generated variants may wander from the recorded ones.
@@ -128,6 +132,7 @@ impl Default for Style {
             letter_spacing: 45.0,
             word_spacing: 280.0,
             connect: true,
+            bridge: true,
             interpolate: true,
             fantasy: 1.0,
             kerning: true,
@@ -143,6 +148,6 @@ impl Style {
     /// Parameters that change glyph shapes (and therefore the cached font glyphs).
     /// Layout-only knobs (line jitter, sag) are excluded so moving them is instant.
     pub fn glyph_key(&self) -> Style {
-        Style { line_jitter: 0.0, sag: 0.0, kerning: false, pairs: false, ..self.clone() }
+        Style { line_jitter: 0.0, sag: 0.0, kerning: false, pairs: false, bridge: false, ..self.clone() }
     }
 }

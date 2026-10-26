@@ -46,7 +46,12 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder }: Props)
 
   const w = width ?? measured?.w ?? 0;
   const fs = fontSize ?? measured?.fs ?? 16;
-  const layout = useMemo(() => (w > 40 ? sketchLayout(code, w, fs, penFor(style, fs, draw.tool)) : null), [code, w, fs, style, draw.tool]);
+  const layout = useMemo(
+    () => (w > 40 ? sketchLayout(code, w, fs, penFor(style, fs, draw)) : null),
+    // The pen's parts, not the object (it is rebuilt on every render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [code, w, fs, style, draw.tool, draw.weight, draw.wobble, draw.pressure, draw.overshoot],
+  );
 
   const [drawing, setDrawing] = useState<Drawing | null>(null);
   useEffect(() => {

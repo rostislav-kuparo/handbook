@@ -10,11 +10,12 @@ use serde::Serialize;
 use crate::derive::{self, Kind};
 use crate::font::{build_font, round_contours, FontGlyph, FontOptions, KeyGlyphs};
 use crate::geom::{strokes_bbox, BBox};
-use crate::kern::{joined_overlap, pair_kern, Profile};
+use crate::kern::{joined_overlap, joined_overlap_at, pair_kern, Profile};
 use crate::model::*;
 use crate::outline;
 use crate::rng::{hash_str, mix, Rng};
 use crate::shape_model::ShapeModel;
+use crate::geom::{Pt, Stroke};
 use crate::synth::{self, adapt_entry, stretch_entry, GlyphInk, Joins, Placement, Position, Prepared};
 
 struct KeyData {
@@ -210,7 +211,16 @@ impl EngineCore {
     fn rebuild_keys(&mut self) {
         let mut next: BTreeMap<String, (u64, Vec<Prepared>, Option<String>)> = BTreeMap::new();
         for (k, (sig, prepared)) in &self.own {
-            next.insert(k.clone(), (*sig, prepared.clone(), None));
+            match self.pair_in_scale(k, prepared) {
+                // No variant of the pair fits its letters' size: they are written one by one.
+                Some((_, kept)) if kept.is_empty() => {}
+                Some((letters, kept)) => {
+                    next.insert(k.clone(), (mix(*sig, letters), kept, None));
+                }
+                None => {
+                    next.insert(k.clone(), (*sig, prepared.clone(), None));
+                }
+            }
         }
         if self.style.derive {
             for &(target, source, kind) in derive::RULES {
@@ -249,6 +259,35 @@ impl EngineCore {
             self.joins = joins;
             self.keys.values_mut().for_each(|k| k.cached = None);
         }
+    }
+
+    /// A letter pair keeps only the variants written at the size of its own
+    /// letters: a pair «на» with a capital-high «Н» would stand out in the
+    /// text. `None` for single letters (and pairs whose letters were never
+    /// written alone); otherwise the signature of those letters and the
+    /// variants kept (possibly none: then the letters are used one by one).
+    fn pair_in_scale(&self, key: &str, prepared: &[Prepared]) -> Option<(u64, Vec<Prepared>)> {
+        let top = |p: &Prepared| strokes_bbox(&p.strokes).y_max;
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        if key.chars().count() < 2 {
+            return None;
+        }
+        let mut sig = 0u64;
+        let mut expected = f64::NEG_INFINITY;
+        for c in key.chars() {
+            let (s, letters) = self.own.get(&c.to_string())?;
+            let mut tops: Vec<f64> = letters.iter().map(top).collect();
+            if tops.is_empty() {
+                return None;
+            }
+            expected = expected.max(median(&mut tops));
+            sig = mix(sig, *s);
+        }
+        let kept = prepared.iter().filter(|p| (0.7 * expected..=1.2 * expected).contains(&top(p))).cloned().collect();
+        Some((sig, kept))
     }
 
     pub fn info(&self) -> EngineInfo {
@@ -319,7 +358,7 @@ impl EngineCore {
             (0..n)
                 .map(|k| {
                     let mut rng = Rng::new(mix(mix(seed, salt), k as u64));
-                    synth::synthesize(&data.prepared, &data.model, Some(k), position, &mut rng, &self.style, &self.joins)
+                    synth::synthesize(&data.prepared, &data.model, Some(k), position, &mut rng, &self.style, &self.joins, true)
                 })
                 .collect()
         };
@@ -396,7 +435,7 @@ impl EngineCore {
         (0..count.min(64))
             .map(|i| {
                 let mut rng = Rng::new(mix(mix(self.key_seed(key), seed as u64), i as u64));
-                let ink = synth::synthesize(&data.prepared, &data.model, None, Position::Any, &mut rng, &self.style, &self.joins);
+                let ink = synth::synthesize(&data.prepared, &data.model, None, Position::Any, &mut rng, &self.style, &self.joins, true);
                 let (polys, pl) = self.finish(&ink);
                 let mut d = String::new();
                 outline::svg_path(&polys, -pl.origin_x, 0.0, true, &mut d);
@@ -564,6 +603,129 @@ impl EngineCore {
         }
     }
 
+    /// A letter joined the font's way: its entry already sits on a join line;
+    /// adapted to the other line after a letter that leaves there, and drawn
+    /// longer when the two letters would still collide.
+    fn snapped_ink(&self, ink: &mut GlyphInk, prev_exit: Option<Level>, prev_profile: Option<&(Profile, f64)>, scale: f64) -> Placed {
+        let style = &self.style;
+        if let (Some(level), Some(e)) = (prev_exit, ink.entry) {
+            if e.level != level {
+                adapt_entry(ink, level, &self.joins);
+            }
+        }
+        let joined = prev_exit.is_some() && ink.entry.is_some();
+        let (mut polys, mut pl, mut profile) = self.placed(ink, scale);
+        if let (true, Some((pp, padv)), Some(e)) = (joined, prev_profile, ink.entry) {
+            let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
+            let need = joined_overlap(&right_rel, &profile.left, e.y * scale, style.weight + 70.0, (style.weight * 0.4).max(8.0));
+            if need > 6.0 && stretch_entry(ink, (need / scale).min(400.0)) {
+                (polys, pl, profile) = self.placed(ink, scale);
+            }
+        }
+        Placed { polys, origin: pl.origin_x, advance: pl.advance, profile, joined, exit: None }
+    }
+
+    /// A letter as it was written, joined to the previous one by the stroke a
+    /// hand would draw: from that letter's real exit to this one's real start —
+    /// its lead-in when it has one, otherwise (`bridge`) the first point of the
+    /// letter. A start inside the letter's own width (the top of the bowl of
+    /// «а», «d», «о») is reached over the top of the bowl. Nothing is bent.
+    fn joined_ink(&self, ink: &mut GlyphInk, bridge: bool, prev: Option<Exit>, prev_profile: Option<&(Profile, f64)>, scale: f64) -> Placed {
+        let style = &self.style;
+        let sb = style.letter_spacing;
+        let radius = style.weight / 2.0;
+        // Where the pen arrives: (stroke, at its start?, written lead-in?).
+        let start = prev.and_then(|_| match ink.entry {
+            Some(e) => synth::end_at(&ink.strokes, e.x, e.y).map(|(si, at)| (si, at, true)),
+            None if bridge => synth::lead_stroke(&ink.strokes).map(|si| (si, true, false)),
+            None => None,
+        });
+        let mut joined = false;
+        let origin = match (prev, start) {
+            (Some(p), Some((si, at_start, written))) => {
+                let py = p.y / scale;
+                let end = |s: &Stroke, at: bool| if at { s[0] } else { s[s.len() - 1] };
+                // A lead-in rising from below where the pen arrives starts where it reaches it (after «о»).
+                if written && py > end(&ink.strokes[si], at_start).y + 60.0 {
+                    let s = &mut ink.strokes[si];
+                    if !at_start {
+                        s.reverse();
+                    }
+                    // Only a real lead-in: never the loop of «l» or the stem of the letter itself.
+                    synth::trim_lead_in(s, py, 0.4);
+                    if !at_start {
+                        s.reverse();
+                    }
+                }
+                let e = end(&ink.strokes[si], at_start);
+                let body = strokes_bbox(&ink.strokes);
+                let over = e.x > body.x_min + (0.3 * body.width()).max(60.0);
+                let g0 = (sb * 0.4).max(12.0);
+                // The pen needs room to climb or drop to the start.
+                let mut origin = e.x - (g0 + 0.35 * (e.y - py).abs()) / scale;
+                if over {
+                    origin = origin.min(body.x_min - radius - g0 / scale);
+                }
+                // The letters themselves must not run into each other.
+                if let Some((pp, padv)) = prev_profile {
+                    let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
+                    let left = Profile::of_strokes(&ink.strokes, radius, -origin, scale).left;
+                    let need = joined_overlap_at(&right_rel, &left, &[p.y, e.y * scale], style.weight + 40.0, (style.weight * 0.4).max(8.0));
+                    origin -= need.min(400.0) / scale;
+                }
+                let s = &ink.strokes[si];
+                let from = Pt::new(origin, py, p.p);
+                let inward = {
+                    let o = synth::outward(s, at_start);
+                    (-o.0, -o.1)
+                };
+                // Arriving into a lead-in: along it. Into a stroke that turns back or drops: straight at it.
+                let in_dir = if inward.0 > 0.3 {
+                    inward
+                } else {
+                    let (dx, dy) = (e.x - from.x, e.y - from.y);
+                    let l = (dx * dx + dy * dy).sqrt().max(1e-9);
+                    (dx / l, dy / l)
+                };
+                let lead = synth::connector(from, p.dir, e, in_dir, over);
+                let s = &mut ink.strokes[si];
+                if at_start {
+                    s.splice(0..0, lead);
+                } else {
+                    s.extend(lead.into_iter().rev());
+                }
+                joined = true;
+                origin
+            }
+            _ => f64::NAN,
+        };
+        let discs = outline::discs(ink, style);
+        let bbox = outline::ink_bbox(&discs);
+        let mut polys = outline::polygons(&discs);
+        let origin = if origin.is_nan() { synth::place(ink, &bbox, style).origin_x } else { origin };
+        let right = match ink.exit {
+            Some(x) => x.x,
+            None if bbox.is_empty() => origin + (sb * 2.0).max(100.0),
+            None => bbox.x_max + sb,
+        };
+        if (scale - 1.0).abs() > 1e-6 {
+            for c in polys.iter_mut() {
+                for q in c.iter_mut() {
+                    *q = [origin + (q[0] - origin) * scale, q[1] * scale];
+                }
+            }
+        }
+        let advance = ((right - origin) * scale).max(20.0);
+        let profile = Profile::of(&polys, -origin);
+        // Where the next letter's connecting stroke starts.
+        let exit = ink.exit.and_then(|x| synth::end_at(&ink.strokes, x.x, x.y)).map(|(si, at)| {
+            let s = &ink.strokes[si];
+            let q = if at { s[0] } else { s[s.len() - 1] };
+            Exit { y: q.y * scale, dir: synth::outward(s, at), p: q.p, scale, shift: 0.0 }
+        });
+        Placed { polys, origin, advance, profile, joined, exit }
+    }
+
     /// Letters of one word: pairs where recorded, joins adapted to the
     /// neighbour's exit height, optical kerning between letters that do not join.
     fn word_items(
@@ -577,10 +739,13 @@ impl EngineCore {
         let style = &self.style;
         let mut out: Vec<Item> = Vec::new();
         let mut prev_exit: Option<Level> = None;
+        let mut prev_join: Option<Exit> = None;
         let mut prev_profile: Option<(Profile, f64)> = None;
         let mut i = 0;
         let letters = chars.len();
         let isolated = |i: usize| abbreviation_letter(chars, i);
+        // Ink joins letters by connecting strokes; the font's way (bending ends onto two lines) otherwise.
+        let bridged = style.bridge && style.connect;
         while i < chars.len() {
             let mut rng = Rng::new(mix(wseed, i as u64));
             let CharStyle { scale, color, shift } = char_styles.get(i).copied().unwrap_or_default();
@@ -602,47 +767,47 @@ impl EngineCore {
             match self.keys.get(&key) {
                 Some(data) => {
                     // Abbreviation letters stand alone; the first letter of a word prefers
-                    // variants written without a joining entry, the others joining ones;
-                    // the last letter goes without a tail.
+                    // variants written without a joining entry; the last letter goes without
+                    // a tail. Inside a word ink takes any variant (the connecting stroke joins
+                    // it); the font only those written to join on the left.
                     let letter = key.chars().all(char::is_alphabetic);
                     let after_letter = i > 0 && chars[i - 1].is_alphabetic();
                     let before_letter = chars.get(i + take).is_some_and(|c| c.is_alphabetic());
                     let position = if isolated(i) {
                         Position::Isolated
                     } else if letter && !before_letter {
-                        if after_letter { Position::Final } else { Position::Single }
+                        match (after_letter, bridged) {
+                            (false, _) => Position::Single,
+                            (true, true) => Position::End,
+                            (true, false) => Position::Final,
+                        }
                     } else if !after_letter {
                         Position::Initial
+                    } else if bridged {
+                        Position::Inside
                     } else {
                         Position::Medial
                     };
-                    let mut ink = synth::synthesize(&data.prepared, &data.model, None, position, &mut rng, style, &self.joins);
-                    if let (Some(level), Some(e)) = (prev_exit, ink.entry) {
-                        if e.level != level {
-                            adapt_entry(&mut ink, level, &self.joins);
-                        }
-                    }
-                    let joined = prev_exit.is_some() && ink.entry.is_some();
-                    let (mut polys, mut pl, mut profile) = self.placed(&ink, scale);
-                    // Joined letters are placed by their anchors alone; when the bodies would
-                    // still run into each other, the connection is drawn that much longer.
-                    if let (true, Some((pp, padv)), Some(e)) = (joined, prev_profile.as_ref(), ink.entry) {
+                    let mut ink = synth::synthesize(&data.prepared, &data.model, None, position, &mut rng, style, &self.joins, !bridged);
+                    let placed = if bridged {
+                        // Only lowercase letters take a connecting stroke into a start written without a lead-in.
+                        let lowercase = letter && !key.chars().any(char::is_uppercase);
+                        let prev = prev_join.filter(|p| (p.scale - scale).abs() < 1e-6 && (p.shift - shift).abs() < 1e-6);
+                        self.joined_ink(&mut ink, lowercase, prev, prev_profile.as_ref(), scale)
+                    } else {
+                        self.snapped_ink(&mut ink, prev_exit, prev_profile.as_ref(), scale)
+                    };
+                    if let (false, true, Some((pp, padv))) = (placed.joined, style.kerning, prev_profile.as_ref()) {
                         let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
-                        let need = joined_overlap(&right_rel, &profile.left, e.y * scale, style.weight + 70.0, (style.weight * 0.4).max(8.0));
-                        if need > 6.0 && stretch_entry(&mut ink, (need / scale).min(400.0)) {
-                            (polys, pl, profile) = self.placed(&ink, scale);
-                        }
-                    }
-                    if let (false, true, Some((pp, padv))) = (joined, style.kerning, prev_profile.as_ref()) {
-                        let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
-                        let k = pair_kern(&right_rel, &profile.left, style.letter_spacing);
+                        let k = pair_kern(&right_rel, &placed.profile.left, style.letter_spacing);
                         if let Some(last) = out.last_mut() {
                             last.advance += k;
                         }
                     }
                     prev_exit = ink.exit.map(|j| j.level);
-                    prev_profile = Some((profile, pl.advance));
-                    out.push(Item { polys, origin: pl.origin_x, advance: pl.advance, fallback: None, pos, scale, color, shift });
+                    prev_join = placed.exit.map(|e| Exit { scale, shift, ..e });
+                    prev_profile = Some((placed.profile, placed.advance));
+                    out.push(Item { polys: placed.polys, origin: placed.origin, advance: placed.advance, fallback: None, pos, scale, color, shift });
                 }
                 None => {
                     let s = key.clone();
@@ -656,6 +821,7 @@ impl EngineCore {
                         missing.push(s.clone());
                     }
                     prev_exit = None;
+                    prev_join = None;
                     prev_profile = None;
                     out.push(Item { polys: vec![], origin: 0.0, advance, fallback: Some(s), pos, scale, color, shift });
                 }
@@ -673,6 +839,29 @@ impl EngineCore {
         }
         out
     }
+}
+
+/// Where a letter leaves towards the next one (ink joins): the height in
+/// font units above the baseline, the direction the pen moves, its pressure,
+/// and the letter's size and raise (only letters alike are joined).
+#[derive(Clone, Copy)]
+struct Exit {
+    y: f64,
+    dir: (f64, f64),
+    p: f64,
+    scale: f64,
+    shift: f64,
+}
+
+/// A letter laid out in ink: outline, origin and advance, kerning profile,
+/// whether it joined the previous letter, and where it leaves to the next.
+struct Placed {
+    polys: Vec<Vec<[f64; 2]>>,
+    origin: f64,
+    advance: f64,
+    profile: Profile,
+    joined: bool,
+    exit: Option<Exit>,
 }
 
 /// One placed letter (or pair) of the ink renderer.
@@ -799,6 +988,20 @@ mod tests {
     }
 
     #[test]
+    fn pairs_written_out_of_scale_are_left_out() {
+        let mut e = EngineCore::new();
+        let singles = vec![wave_sample("1", "с", 200.0, true), wave_sample("2", "т", 300.0, true)];
+        let mut tall = singles.clone();
+        tall.extend([wave_sample("3", "ст", 700.0, true), wave_sample("4", "ст", 280.0, true)]);
+        e.set_samples(tall);
+        assert_eq!(e.keys["ст"].prepared.len(), 1, "the capital-high variant is dropped");
+        let mut only_tall = singles.clone();
+        only_tall.push(wave_sample("3", "ст", 700.0, true));
+        e.set_samples(only_tall);
+        assert!(!e.keys.contains_key("ст"), "with no variant in scale the letters go one by one");
+    }
+
+    #[test]
     fn recorded_pair_is_used_in_the_font() {
         let mut e = EngineCore::new();
         e.set_samples(vec![wave_sample("1", "с", 200.0, true), wave_sample("2", "т", 300.0, true), wave_sample("3", "ст", 260.0, true)]);
@@ -859,6 +1062,52 @@ mod tests {
         let sub = e.render_paragraph("ж1", 9000.0, 1500.0, 1, &HashMap::new(), &sub);
         assert!((sub.fallback[1].y - plain.fallback[1].y - 180.0).abs() < 1e-6, "subscript 180 units lower");
         assert_eq!(sub.fallback[0].y, plain.fallback[0].y, "the letter itself stays");
+    }
+
+    /// «т» written from the top down, without a lead-in: it starts words.
+    fn from_the_top(id: &str, ch: &str) -> Sample {
+        let mut pts: Vec<InkPoint> = (0..=30).map(|i| InkPoint { x: 0.0, y: 420.0 - i as f64 * 13.0, t: i as f64 * 6.0, p: 0.5 }).collect();
+        pts.extend((1..=15).map(|i| InkPoint { x: i as f64 * 12.0, y: 30.0, t: 200.0 + i as f64 * 6.0, p: 0.5 }));
+        Sample {
+            id: id.into(),
+            ch: ch.into(),
+            strokes: vec![pts],
+            entry: Some(Anchor { x: 0.0, y: 420.0, connect: false }),
+            exit: Some(Anchor { x: 180.0, y: 30.0, connect: true }),
+            pointer_type: Some("mouse".into()),
+        }
+    }
+
+    #[test]
+    fn ink_joins_a_letter_written_without_a_lead_in() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true), from_the_top("2", "т")]);
+        let chars: Vec<char> = "мт".chars().collect();
+        let left_of = |it: &Item| it.polys.iter().flatten().map(|p| p[0]).fold(f64::INFINITY, f64::min) - it.origin;
+        let joined = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[]);
+        assert!(left_of(&joined[1]) < 5.0, "the connecting stroke starts where «м» leaves: {}", left_of(&joined[1]));
+        e.set_style(Style { bridge: false, ..Style::default() });
+        let apart = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[]);
+        assert!(left_of(&apart[1]) > 20.0, "without connecting strokes «т» stands apart: {}", left_of(&apart[1]));
+    }
+
+    #[test]
+    fn ink_letters_inside_a_word_come_from_all_their_variants() {
+        // One «т» written with a lead-in, three without: inside words all four turn up.
+        let mut e = EngineCore::new();
+        e.set_style(Style { interpolate: false, jitter: 0.0, ..Style::default() });
+        let mut samples = vec![wave_sample("1", "м", 300.0, true), wave_sample("2", "т", 200.0, true)];
+        samples.extend((0..3).map(|k| from_the_top(&format!("t{k}"), "т")));
+        e.set_samples(samples);
+        let chars: Vec<char> = "мтм".chars().collect();
+        let leads = (0..40u64)
+            .filter(|&w| {
+                let items = e.word_items(&chars, w, &HashMap::new(), &mut vec![], &[]);
+                // The wave «т» is 230 tall, the one from the top 420.
+                items[1].polys.iter().flatten().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max) < 330.0
+            })
+            .count();
+        assert!(leads > 2 && leads < 25, "the variant with a lead-in is one of four, not the only one: {leads} of 40");
     }
 
     #[test]

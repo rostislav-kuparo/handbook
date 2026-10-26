@@ -10,6 +10,10 @@ export interface Pen {
   pressure: number;
   /** 0..1: how much the hand wobbles. */
   jitter: number;
+  /** Factor on all the shaking and bowing of the lines: 0 — as with a ruler (default 1). */
+  wobble?: number;
+  /** Factor on how far straight lines run past their ends (default 1). */
+  overshoot?: number;
 }
 
 export type Rand = () => number;
@@ -72,6 +76,7 @@ export function wobble(pts: Vec[], r: Rand, pen: Pen, o: StrokeOptions = {}): Ve
   const total = length(line);
   if (total < 0.5) return line;
   const k = Math.min(Math.max(pen.width / 1.4, 0.6), 2);
+  const shake = pen.wobble ?? 1;
   if (o.straight) {
     // Overshoot (or stop a little short) at both ends.
     const ext = (p: Vec, q: Vec, by: number): Vec => {
@@ -79,19 +84,20 @@ export function wobble(pts: Vec[], r: Rand, pen: Pen, o: StrokeOptions = {}): Ve
       return { x: p.x + ((p.x - q.x) / d) * by, y: p.y + ((p.y - q.y) / d) * by };
     };
     const n = line.length;
-    line = [ext(line[0], line[1], (r() * 2.2 - 0.6) * k), ...line.slice(1, -1), ext(line[n - 1], line[n - 2], (r() * 2.2 - 0.6) * k)];
+    const over = (pen.overshoot ?? 1) * k;
+    line = [ext(line[0], line[1], (r() * 2.2 - 0.6) * over), ...line.slice(1, -1), ext(line[n - 1], line[n - 2], (r() * 2.2 - 0.6) * over)];
   }
   const dense = resample(line, 2.5);
   const L = length(dense);
   const j = pen.jitter;
-  const calm = o.straight ? 1 : 0.6;
+  const calm = (o.straight ? 1 : 0.6) * shake;
   const a1 = (0.25 + 0.7 * j) * k * calm;
   const l1 = 90 + r() * 120;
   const p1 = r() * Math.PI * 2;
   const a2 = 0.2 * j * k * calm;
   const l2 = 25 + r() * 25;
   const p2 = r() * Math.PI * 2;
-  const bow = o.straight ? (r() * 2 - 1) * Math.min(2.5 * k, 0.008 * L) * (0.6 + j) : 0;
+  const bow = o.straight ? (r() * 2 - 1) * Math.min(2.5 * k, 0.008 * L) * (0.6 + j) * shake : 0;
   const ns = normals(dense);
   let s = 0;
   return dense.map((p, i) => {

@@ -7,6 +7,8 @@
 //! are pushed apart. Joined cursive pairs are never kerned — their anchors
 //! already position them.
 
+use crate::geom::Stroke;
+
 pub const BAND: f64 = 20.0;
 const Y_MIN: f64 = -500.0;
 pub const BANDS: usize = 90; // -500 .. 1300
@@ -49,6 +51,22 @@ impl Profile {
         p
     }
 
+    /// Profile of centre lines drawn with a pen of `radius`, shifted by `dx` and
+    /// scaled by `scale` around x = 0 (a cheap stand-in for the outline).
+    pub fn of_strokes(strokes: &[Stroke], radius: f64, dx: f64, scale: f64) -> Profile {
+        let mut p = Profile::empty();
+        for s in strokes {
+            for q in s {
+                let (x, y) = ((q.x + dx) * scale, q.y * scale);
+                for band in band_of(y - radius)..=band_of(y + radius) {
+                    p.add(band, x - radius);
+                    p.add(band, x + radius);
+                }
+            }
+        }
+        p
+    }
+
     /// Envelope over several variants: the widest possible ink, so a kern
     /// value that is safe for the envelope is safe for every variant.
     pub fn envelope(profiles: &[(Profile, f64)]) -> (Vec<f64>, Vec<f64>) {
@@ -73,9 +91,15 @@ pub fn band_center(band: usize) -> f64 {
 /// letter (0 when it already does). Bands near the join line are skipped:
 /// there the two letters meet on purpose.
 pub fn joined_overlap(right_rel: &[f64], left: &[f64], join_y: f64, keep_out: f64, gap: f64) -> f64 {
+    joined_overlap_at(right_rel, left, &[join_y], keep_out, gap)
+}
+
+/// The same, skipping the bands near any of several heights (the exit of
+/// one letter and the start of the next, joined by a connecting stroke).
+pub fn joined_overlap_at(right_rel: &[f64], left: &[f64], join_ys: &[f64], keep_out: f64, gap: f64) -> f64 {
     let mut need: f64 = 0.0;
     for i in 0..BANDS {
-        if (band_center(i) - join_y).abs() < keep_out {
+        if join_ys.iter().any(|y| (band_center(i) - y).abs() < keep_out) {
             continue;
         }
         if right_rel[i].is_finite() && left[i].is_finite() {
