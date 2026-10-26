@@ -1,6 +1,6 @@
 [package]
 name = "handbook"
-version = "0.2.0"
+version = "0.3.0"
 description = "Handbook: a text editor that writes in your own handwriting"
 authors = []
 license = ""

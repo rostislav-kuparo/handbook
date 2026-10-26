@@ -69,6 +69,8 @@ export interface CharStyles {
   colors: number[];
   /** Raise above the baseline in em: superscripts > 0, subscripts < 0. */
   shifts?: number[];
+  /** How often each word of the paragraph occurred earlier in the document (repeats get new letters). */
+  seen?: Record<string, number>;
 }
 
 export const engine = {

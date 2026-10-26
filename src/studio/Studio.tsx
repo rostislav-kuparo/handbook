@@ -215,7 +215,8 @@ export function Studio() {
               <p className="muted small">
                 Кружки — точки входа и выхода. Зелёный — буква соединяется с соседней в этой точке (у строки или на высоте
                 строчных). Жёлтый — соединение включено, но точка не на краю буквы, поэтому оно не сработает. Клик
-                переключает. Вариант без входа ставится в начало слова, с входом и выходом — в середину.
+                переключает, а если точка встала не туда — перетащите кружок: он встанет на ближайший конец штриха.
+                Вариант без входа ставится в начало слова, с входом и выходом — в середину.
               </p>
               <div className="thumbs">
                 {variants.map((s) => (
@@ -224,7 +225,7 @@ export function Studio() {
                     sample={s}
                     weightKey={weightKey}
                     onDelete={() => void deleteSample(s.id)}
-                    onToggleAnchor={(side, anchor) => void updateSample(s.id, { [side]: anchor })}
+                    onAnchor={(side, anchor) => void updateSample(s.id, { [side]: anchor })}
                   />
                 ))}
                 {variants.length === 0 && (

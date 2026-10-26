@@ -1,6 +1,10 @@
 import { createContext, type CSSProperties, type ReactNode } from 'react';
+import { DrawPenContext } from '../sketch/SketchFigure';
 import { LINE_HEIGHT_EM } from './layout';
-import { DEFAULT_PAGE, geometry, PITCH, SHEET_H, SHEET_W, stackHeight, type Geometry, type PaperStyle } from './page';
+import { DEFAULT_PAGE, geometry, PITCH, SHEET_H, SHEET_W, stackHeight, type DrawPen, type Geometry, type PaperStyle } from './page';
+
+/** Number of sheet `index` when the first one is `firstNumber` (null: not numbered). */
+export const numberOf = (firstNumber: number | null, index: number) => (firstNumber === null ? null : firstNumber + index);
 
 /** Geometry of the open document's sheets (node views read it for floating blocks). */
 export const PageContext = createContext<Geometry>(geometry(DEFAULT_PAGE));
@@ -17,9 +21,10 @@ export function paperVars(fontSize: number, ink: string): CSSProperties {
   };
 }
 
-/** One A4 sheet: ruling, squares or plain paper; margin line; page number. */
+/** One A4 sheet: ruling, squares or plain paper; margin line; page number (null: none). */
 export function Sheet({
   index,
+  number,
   geo,
   paper,
   fontSize,
@@ -27,6 +32,7 @@ export function Sheet({
   children,
 }: {
   index: number;
+  number: number | null;
   geo: Geometry;
   paper: PaperStyle;
   fontSize: number;
@@ -53,9 +59,11 @@ export function Sheet({
         />
       )}
       {paper !== 'plain' && <div className="sheet-margin" style={{ left: geo.margin.left - 14 }} />}
-      <span className="page-number" style={{ bottom: Math.min(28, geo.margin.bottom / 2.5) }}>
-        {index + 1}
-      </span>
+      {number !== null && (
+        <span className="page-number" style={{ bottom: Math.min(28, geo.margin.bottom / 2.5) }}>
+          {number}
+        </span>
+      )}
       {children}
     </div>
   );
@@ -67,6 +75,8 @@ export function Sheet({
  */
 export function Paper({
   pages,
+  firstNumber,
+  drawPen,
   fontSize,
   geo,
   paper,
@@ -75,6 +85,10 @@ export function Paper({
   onBlankClick,
 }: {
   pages: number;
+  /** Number of the first sheet; null: sheets are not numbered. */
+  firstNumber: number | null;
+  /** What the document's drawings are drawn with. */
+  drawPen: DrawPen;
   fontSize: number;
   geo: Geometry;
   paper: PaperStyle;
@@ -84,6 +98,7 @@ export function Paper({
 }) {
   return (
     <PageContext.Provider value={geo}>
+      <DrawPenContext.Provider value={drawPen}>
       <div
         className="paper-stack"
         style={{ ...paperVars(fontSize, ink), width: SHEET_W, height: stackHeight(pages) }}
@@ -96,12 +111,21 @@ export function Paper({
         }}
       >
         {Array.from({ length: pages }, (_, i) => (
-          <Sheet key={i} index={i} geo={geo} paper={paper} fontSize={fontSize} style={{ position: 'absolute', top: i * PITCH, left: 0 }} />
+          <Sheet
+            key={i}
+            index={i}
+            number={numberOf(firstNumber, i)}
+            geo={geo}
+            paper={paper}
+            fontSize={fontSize}
+            style={{ position: 'absolute', top: i * PITCH, left: 0 }}
+          />
         ))}
         <div className="sheet-content" style={{ left: geo.margin.left, top: geo.margin.top, width: geo.contentW }}>
           {children}
         </div>
       </div>
+      </DrawPenContext.Provider>
     </PageContext.Provider>
   );
 }

@@ -1,5 +1,6 @@
 // A drawing from its text: the same picture in the editor, the rendered
 // view and the exported sheets.
+import type { DrawPen } from '../editor/page';
 import { FALLBACK_FONTS } from '../engine/constants';
 import type { Style } from '../model/types';
 import { compileSketch } from './evaluate';
@@ -15,10 +16,32 @@ export interface Drawing {
   empty: boolean;
 }
 
-/** The handwriting's own pen, at this letter size. */
-export function penFor(style: Style, fontSize: number): Pen {
-  return { width: Math.max(0.8, (style.weight * fontSize) / 1000), pressure: style.pressure, jitter: style.jitter };
+/** Colour of a pencil line when the drawing does not choose one. */
+export const GRAPHITE = '#4d4f56';
+
+/**
+ * The handwriting's own pen, at this letter size. A pencil draws a thinner,
+ * shakier line whose weight breathes more with the pressure.
+ */
+export function penFor(style: Style, fontSize: number, tool: DrawPen['tool'] = 'pen'): Pen {
+  const width = Math.max(0.8, (style.weight * fontSize) / 1000);
+  if (tool === 'pencil') {
+    return { width: Math.max(0.7, width * 0.72), pressure: Math.min(1, style.pressure + 0.3), jitter: Math.min(1, style.jitter * 1.2 + 0.15) };
+  }
+  return { width, pressure: style.pressure, jitter: style.jitter };
 }
+
+/**
+ * Graphite: the line's ink keeps only where the paper's grain lets it, so it
+ * looks rubbed onto the paper rather than laid down with ink. The same id in
+ * every drawing is fine — the definitions are identical.
+ */
+const PENCIL_DEFS =
+  '<defs><filter id="hb-pencil" x="-2%" y="-2%" width="104%" height="104%" color-interpolation-filters="sRGB">' +
+  '<feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" seed="7" result="grain"/>' +
+  '<feColorMatrix in="grain" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -2.4 2.05" result="paper"/>' +
+  '<feComposite in="SourceGraphic" in2="paper" operator="in"/>' +
+  '</filter></defs>';
 
 const layouts = new Map<string, SketchLayout>();
 
@@ -55,29 +78,36 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
  * The drawing's SVG content (without the <svg> element). With `ink` the colours
  * are written out (export); without it the pen follows the page: currentColor,
  * and coloured pens are toned down on dark paper like coloured words.
+ * `draw`: pen or pencil and its colour (objects coloured by SetColor keep theirs).
  */
-export function drawingBody(d: Drawing, ink?: string): string {
+export function drawingBody(d: Drawing, ink?: string, draw?: DrawPen): string {
   const fill = (color?: string) => {
     if (!color) return ink ? `fill="${ink}"` : 'fill="currentColor"';
     return ink ? `fill="${color}"` : `style="fill:color-mix(in srgb, ${color} var(--pen-mix, 100%), #e6ecff)"`;
   };
+  const pencil = draw?.tool === 'pencil';
+  const lineColor = draw?.color ?? (pencil ? GRAPHITE : undefined);
+  const labelColor = draw?.labelsInPen ? undefined : lineColor;
   const out: string[] = [];
-  for (const p of d.paths) out.push(`<path d="${p.d}" ${fill(p.color)}${p.opacity !== undefined ? ` opacity="${p.opacity}"` : ''}/>`);
+  if (pencil) out.push(PENCIL_DEFS, '<g filter="url(#hb-pencil)">');
+  for (const p of d.paths) out.push(`<path d="${p.d}" ${fill(p.color ?? lineColor)}${p.opacity !== undefined ? ` opacity="${p.opacity}"` : ''}/>`);
+  if (pencil && draw?.labelsInPen) out.push('</g>');
   for (const l of d.labels) {
     const texts = l.ink.fallback
       .map((f) => `<text x="${f.x}" y="${f.y}" font-size="${1000 * f.scale}" font-family='${FALLBACK_FONTS}' opacity="0.7">${esc(f.ch)}</text>`)
       .join('');
     out.push(
-      `<g transform="translate(${l.x.toFixed(1)} ${l.y.toFixed(1)}) scale(${l.scale.toFixed(5)})" ${fill(l.color)}>` +
+      `<g transform="translate(${l.x.toFixed(1)} ${l.y.toFixed(1)}) scale(${l.scale.toFixed(5)})" ${fill(l.color ?? labelColor)}>` +
         (l.ink.d ? `<path d="${l.ink.d}"/>` : '') +
         texts +
         '</g>',
     );
   }
+  if (pencil && !draw?.labelsInPen) out.push('</g>');
   return out.join('');
 }
 
 /** A standalone <svg> of the drawing. */
-export function drawingSvg(d: Drawing, ink?: string): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, ink)}</svg>`;
+export function drawingSvg(d: Drawing, ink?: string, draw?: DrawPen): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, ink, draw)}</svg>`;
 }

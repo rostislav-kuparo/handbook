@@ -19,10 +19,12 @@ export interface LabelInk {
 
 /** Signs the hand may not have written yet are drawn with their plain look-alikes. */
 function substitute(text: string): string {
-  return text.replace(/[−′]/g, (c) => {
-    const alt = c === '−' ? '-' : "'";
-    return !hasGlyph(c) && hasGlyph(alt) ? alt : c;
-  });
+  return text
+    .replace(/[−′]/g, (c) => {
+      const alt = c === '−' ? '-' : "'";
+      return !hasGlyph(c) && hasGlyph(alt) ? alt : c;
+    })
+    .replace(/\s*≡\s*/g, () => (hasGlyph('≡') ? ' ≡ ' : ', '));
 }
 
 const cache = new Map<string, Promise<LabelInk>>();

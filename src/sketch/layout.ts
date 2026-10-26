@@ -19,6 +19,8 @@ export interface Spot {
   y: number;
   ax: number;
   ay: number;
+  /** How much worse than the best place this one is (default: its index × 0.6). */
+  cost?: number;
 }
 
 export interface LabelRequest {
@@ -29,7 +31,7 @@ export interface LabelRequest {
   seed: number;
   /** Places to choose from, best first. */
   spots: Spot[];
-  /** Goes exactly to its first spot (axis numbers, texts, the title). */
+  /** Keeps to its first spot unless that one covers a line (axis numbers, texts, the title). */
   fixed?: boolean;
 }
 
@@ -236,10 +238,28 @@ function aroundPoint(p: Vec, gap: number): Spot[] {
     { x: p.x - d, y: p.y, ax: 1, ay: 0.5 },
     { x: p.x, y: p.y - d, ax: 0.5, ay: 1 },
     { x: p.x, y: p.y + d, ax: 0.5, ay: 0 },
-  ];
+  ].map((s, i) => ({ ...s, cost: i * 0.6 }));
 }
 
-/** Places beside a drawn line, at the given shares of its length. */
+/**
+ * Further places around a point, for crowded corners: two more rings of
+ * twelve directions. The label's box always opens away from the point.
+ */
+function ringsAround(p: Vec, gap: number): Spot[] {
+  const out: Spot[] = [];
+  [2.1, 3.2].forEach((k, ring) => {
+    for (let i = 0; i < 12; i++) {
+      const a = Math.PI / 4 + (i * Math.PI) / 6;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      const side = (v: number) => 0.5 - 0.5 * Math.sign(v) * Math.min(1, Math.abs(v) * 1.6);
+      out.push({ x: p.x + c * gap * k, y: p.y - s * gap * k, ax: side(c), ay: 1 - side(s), cost: 5 + ring * 2.5 + i * 0.05 });
+    }
+  });
+  return out;
+}
+
+/** Places beside a drawn line, at the given shares of its length (nearer first, then a little further off). */
 function alongLine(pieces: Vec[][], shares: number[], gap: number): Spot[] {
   const all = pieces.flat();
   if (all.length < 2) return [];
@@ -247,11 +267,15 @@ function alongLine(pieces: Vec[][], shares: number[], gap: number): Spot[] {
   for (let i = 1; i < all.length; i++) cum.push(cum[i - 1] + g.dist(all[i - 1], all[i]));
   const total = cum[cum.length - 1];
   const out: Spot[] = [];
-  for (const share of shares) {
-    const at = total * share;
-    const i = Math.max(1, cum.findIndex((c) => c >= at));
-    out.push(...aroundPoint(all[Math.min(i, all.length - 1)], gap).slice(0, 4));
-  }
+  [1, 2].forEach((k, far) => {
+    shares.forEach((share, j) => {
+      const at = total * share;
+      const i = Math.max(1, cum.findIndex((c) => c >= at));
+      aroundPoint(all[Math.min(i, all.length - 1)], gap * k)
+        .slice(0, 4)
+        .forEach((s, n) => out.push({ ...s, cost: far * 4 + (j * 4 + n) * 0.6 }));
+    });
+  });
   return out;
 }
 
@@ -352,14 +376,15 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
       if (Math.abs(t.v) < 1e-9 && originShown) return;
       if (x < rect.x0 + 2 || x > rect.x1 - 2) return;
       stroke([{ x, y: ay - fs * 0.14 }, { x, y: ay + fs * 0.14 }], tick, 10 + i);
-      label(t.text, fs * 0.58, [{ x, y: ay + fs * 0.3, ax: 0.5, ay: 0 }], mix(base, 1000 + i), undefined, true);
+      // Below the axis; above it when a line runs there.
+      label(t.text, fs * 0.58, [{ x, y: ay + fs * 0.3, ax: 0.5, ay: 0 }, { x, y: ay - fs * 0.3, ax: 0.5, ay: 1 }], mix(base, 1000 + i), undefined, true);
     });
     yt.forEach((t, i) => {
       const y = Y(t.v);
       if (Math.abs(t.v) < 1e-9 && originShown) return;
       if (y < rect.y0 + 2 || y > rect.y1 - 2) return;
       stroke([{ x: ax - fs * 0.14, y }, { x: ax + fs * 0.14, y }], tick, 200 + i);
-      label(t.text, fs * 0.58, [{ x: ax - fs * 0.3, y, ax: 1, ay: 0.5 }], mix(base, 2000 + i), undefined, true);
+      label(t.text, fs * 0.58, [{ x: ax - fs * 0.3, y, ax: 1, ay: 0.5 }, { x: ax + fs * 0.3, y, ax: 0, ay: 0.5 }], mix(base, 2000 + i), undefined, true);
     });
     if (originShown) label('0', fs * 0.58, [{ x: ax - fs * 0.22, y: ay + fs * 0.22, ax: 1, ay: 0 }], mix(base, 23), undefined, true);
   }
@@ -392,6 +417,8 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
 
   // ---- the objects; points go last so they lie on top of their lines
   const points: (() => void)[] = [];
+  /** Labels of points, written once all points are known (points in one place share a label). */
+  const pointLabels: { p: Vec; radius: number; caption: string; seed: number; color?: string }[] = [];
   let texts = 0;
   for (const it of items) {
     const s = it.shape;
@@ -411,7 +438,7 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
           const radius = Math.max(1.8, pen.width * 1.1 + fs * 0.05) * Math.sqrt(it.thickness / 5);
           paths.push({ d: dot(p, radius, rng(it.seed)), color: it.color });
           obstacles.push(p, { x: p.x - radius, y: p.y }, { x: p.x + radius, y: p.y });
-          if (it.showLabel) label(caption, fs * 0.9, aroundPoint(p, gap + radius * 0.5), lseed, it.color);
+          if (it.showLabel && caption.trim()) pointLabels.push({ p, radius, caption, seed: lseed, color: it.color });
         });
         break;
       }
@@ -560,6 +587,21 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     }
   }
   points.forEach((p) => p());
+  // Points drawn in one place (A₂ and B₂ of a projecting line, Qx₁ and Qx₂)
+  // get one label, «A₂ ≡ B₂» as in textbooks, instead of two on top of each other.
+  const groups: (typeof pointLabels)[] = [];
+  for (const pl of pointLabels) {
+    const near = groups.find((grp) => g.dist(grp[0].p, pl.p) < Math.max(3, pen.width * 2));
+    if (near) near.push(pl);
+    else groups.push([pl]);
+  }
+  for (const grp of groups) {
+    const radius = Math.max(...grp.map((x) => x.radius));
+    const captions = [...new Set(grp.map((x) => x.caption))];
+    const colors = new Set(grp.map((x) => x.color));
+    const spots = [...aroundPoint(grp[0].p, gap + radius * 0.5), ...ringsAround(grp[0].p, gap + radius * 0.5)];
+    label(captions.join(' ≡ '), fs * 0.9, spots, grp[0].seed, colors.size === 1 ? grp[0].color : undefined);
+  }
 
   function fill(poly: Vec[], it: Item) {
     const r = rng(mix(it.seed, 5));
@@ -578,7 +620,13 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
   return { width, height: fr.height, paths, labels, obstacles, empty: !items.length && !scene.title && !fr.axes };
 }
 
-/** Labels to their places: the first spot that covers no line and no other label. */
+/**
+ * Labels to their places: for each, the spot that covers no line and no
+ * other label, the nearest such one. Fixed labels (axis numbers, texts, the
+ * title) go first and leave their spot only when it covers a line; then the
+ * labels with the fewest free spots, so a crowded point gets its place before
+ * an easy one takes it.
+ */
 export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel[] {
   const cell = 12;
   const grid = new Map<string, Vec[]>();
@@ -602,28 +650,47 @@ export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel
     area({ x0: Math.max(a.x0, b.x0), y0: Math.max(a.y0, b.y0), x1: Math.min(a.x1, b.x1), y1: Math.min(a.y1, b.y1) });
   const taken: g.Rect[] = [];
   const out: PlacedLabel[] = [];
-  const order = layout.labels.map((_, i) => i).sort((a, b) => Number(!!layout.labels[b].fixed) - Number(!!layout.labels[a].fixed));
+  // Any line through a label is worse than moving it a ring further out.
+  const LINE = 10;
+  const PER_HIT = 4;
+  const pad = 2;
+  /** Labels keep a little air between each other. */
+  const apart = 4;
+  const boxes = layout.labels.map((req, i) => {
+    const s = req.size / 1000;
+    const ink = inks[i];
+    const w = (ink.x1 - ink.x0) * s;
+    const h = (ink.y1 - ink.y0) * s;
+    return req.spots.map((sp, k) => {
+      const box = { x0: sp.x - sp.ax * w, y0: sp.y - sp.ay * h, x1: sp.x - sp.ax * w + w, y1: sp.y - sp.ay * h + h };
+      const n = w > 0 && h > 0 ? hits({ x0: box.x0 - pad, y0: box.y0 - pad, x1: box.x1 + pad, y1: box.y1 + pad }) : 0;
+      const a = Math.max(area(box), 1e-6);
+      const inside = overlap(box, { x0: 0, y0: 0, x1: layout.width, y1: layout.height });
+      const order = req.fixed ? (k === 0 ? 0 : 12 + k) : sp.cost ?? k * 0.6;
+      return { box, base: order + (n ? LINE + PER_HIT * n : 0) + (25 * (a - inside)) / a };
+    });
+  });
+  // Hardest first: the label whose best spot (ignoring other labels) is worst.
+  const hardness = boxes.map((c) => Math.min(...c.map((x) => x.base), Infinity));
+  const order = layout.labels
+    .map((_, i) => i)
+    .sort((a, b) => Number(!!layout.labels[b].fixed) - Number(!!layout.labels[a].fixed) || hardness[b] - hardness[a] || a - b);
   for (const i of order) {
     const req = layout.labels[i];
     const ink = inks[i];
     const s = req.size / 1000;
-    const w = (ink.x1 - ink.x0) * s;
-    const h = (ink.y1 - ink.y0) * s;
-    if (w <= 0 || h <= 0) continue;
+    if (ink.x1 - ink.x0 <= 0 || ink.y1 - ink.y0 <= 0) continue;
     let best: g.Rect | null = null;
     let bestCost = Infinity;
-    req.spots.forEach((sp, k) => {
-      if (req.fixed && k > 0) return;
-      const box = { x0: sp.x - sp.ax * w, y0: sp.y - sp.ay * h, x1: sp.x - sp.ax * w + w, y1: sp.y - sp.ay * h + h };
-      const a = area(box);
-      const inside = overlap(box, { x0: 0, y0: 0, x1: layout.width, y1: layout.height });
-      const crowd = taken.reduce((sum, t) => sum + overlap(box, t), 0);
-      const cost = k * 0.6 + 3 * hits({ x0: box.x0 - 1.5, y0: box.y0 - 1.5, x1: box.x1 + 1.5, y1: box.y1 + 1.5 }) + (30 * crowd) / a + (25 * (a - inside)) / a;
+    for (const { box, base } of boxes[i]) {
+      const a = Math.max(area(box), 1e-6);
+      const crowd = taken.reduce((sum, t) => sum + overlap({ x0: box.x0 - apart, y0: box.y0 - apart, x1: box.x1 + apart, y1: box.y1 + apart }, t), 0);
+      const cost = base + (crowd ? LINE + (30 * crowd) / a : 0);
       if (cost < bestCost) {
         bestCost = cost;
         best = box;
       }
-    });
+    }
     if (!best) continue;
     const b: g.Rect = best;
     taken.push(b);

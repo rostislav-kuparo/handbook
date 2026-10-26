@@ -78,6 +78,9 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* The window itself never scrolls or bounces: only the panels inside it do. */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 body {
   background: var(--desk);
@@ -155,6 +158,7 @@ kbd {
   display: flex;
   flex-direction: column;
   height: 100%;
+  overflow: hidden;
 }
 .topbar {
   display: grid;
@@ -221,6 +225,7 @@ kbd {
   border-right: 1px solid var(--line);
   background: var(--panel);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 .doc-list ul {
   list-style: none;
@@ -274,6 +279,7 @@ kbd {
 .doc-main {
   flex: 1;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 0 24px 60px;
 }
 .toolbar {
@@ -533,6 +539,58 @@ kbd {
 }
 .html-block-tools .danger:hover {
   color: var(--red);
+}
+.pen-menu-wrap {
+  position: relative;
+}
+.pen-menu {
+  left: auto;
+  right: 0;
+  width: 250px;
+  min-width: 0;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font: 13px system-ui, sans-serif;
+}
+.pen-menu p {
+  margin: 0;
+}
+.draw-pen {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.segmented {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.segmented button,
+.html-block-tools .segmented button {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.segmented button + button {
+  border-left: 1px solid var(--line);
+}
+.segmented button.on,
+.html-block-tools .segmented button.on {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.page-menu-drawings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 .html-block-frame {
   /* Same color-scheme as the page, so the frame stays transparent and blocks follow the theme. */
@@ -893,6 +951,7 @@ kbd {
 .alphabet,
 .side {
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   background: var(--panel);
 }
@@ -974,6 +1033,7 @@ kbd {
 }
 .workbench {
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 16px 24px 40px;
 }
 .progress {
@@ -1191,7 +1251,22 @@ line.guide.dashed {
   opacity: 0.6;
 }
 .anchor {
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
+}
+.anchor.dragging {
+  cursor: grabbing;
+}
+.anchor.dragging circle {
+  stroke-width: 26;
+}
+.anchor-spot {
+  fill: var(--accent);
+  opacity: 0.35;
+  pointer-events: none;
+}
+.anchor-spot.target {
+  opacity: 0.7;
 }
 .anchor circle {
   stroke-width: 16;
@@ -1304,8 +1379,11 @@ line.guide.dashed {
     margin: 0;
   }
   html,
-  body {
+  body,
+  #root {
     background: #fff !important;
+    height: auto;
+    overflow: visible;
   }
   .no-print,
   .topbar,
@@ -1418,6 +1496,13 @@ line.guide.dashed {
 .swatch.on {
   box-shadow: 0 0 0 2px var(--accent);
 }
+.swatch.auto::after {
+  content: 'A';
+  display: block;
+  font: 600 10px/16px system-ui, sans-serif;
+  color: #fff;
+  text-align: center;
+}
 .swatch.custom {
   position: relative;
   display: inline-block;
@@ -1517,11 +1602,33 @@ line.guide.dashed {
 }
 .page-menu-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--line);
+}
+.numbering-row {
+  order: 3;
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.first-number {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.first-number input {
+  width: 64px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 3px 6px;
+  background: var(--paper);
 }
 .page-menu-foot .check {
   font-size: 12.5px;

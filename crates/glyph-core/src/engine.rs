@@ -10,12 +10,12 @@ use serde::Serialize;
 use crate::derive::{self, Kind};
 use crate::font::{build_font, round_contours, FontGlyph, FontOptions, KeyGlyphs};
 use crate::geom::{strokes_bbox, BBox};
-use crate::kern::{pair_kern, Profile};
+use crate::kern::{joined_overlap, pair_kern, Profile};
 use crate::model::*;
 use crate::outline;
 use crate::rng::{hash_str, mix, Rng};
 use crate::shape_model::ShapeModel;
-use crate::synth::{self, adapt_entry, GlyphInk, Joins, Placement, Position, Prepared};
+use crate::synth::{self, adapt_entry, stretch_entry, GlyphInk, Joins, Placement, Position, Prepared};
 
 struct KeyData {
     signature: u64,
@@ -95,6 +95,10 @@ pub struct CharStyles {
     pub colors: Vec<u8>,
     /// Raise above the baseline per character, in em (superscript > 0, subscript < 0).
     pub shifts: Vec<f64>,
+    /// How many times each word of this paragraph already occurred earlier in
+    /// the document, so a «1.» or «і» repeated in every paragraph still
+    /// gets a different instance each time.
+    pub seen: HashMap<String, u64>,
 }
 
 /// Size, colour index and raise (font units, up) of one character.
@@ -268,6 +272,22 @@ impl EngineCore {
         (polys, synth::place(ink, &bbox, &self.style))
     }
 
+    /// Outline, placement and kerning profile of a letter at a size factor
+    /// (scaled around its origin on the baseline).
+    fn placed(&self, ink: &GlyphInk, scale: f64) -> (Vec<Vec<[f64; 2]>>, Placement, Profile) {
+        let (mut polys, mut pl) = self.finish(ink);
+        if (scale - 1.0).abs() > 1e-6 {
+            for c in polys.iter_mut() {
+                for p in c.iter_mut() {
+                    *p = [pl.origin_x + (p[0] - pl.origin_x) * scale, p[1] * scale];
+                }
+            }
+            pl.advance *= scale;
+        }
+        let profile = Profile::of(&polys, -pl.origin_x);
+        (polys, pl, profile)
+    }
+
     fn font_glyph(&self, ink: &GlyphInk) -> FontGlyph {
         let (polys, pl) = self.finish(ink);
         FontGlyph {
@@ -407,8 +427,9 @@ impl EngineCore {
     /// lines are uneven like real handwriting. Units are font units, y down, the
     /// first baseline at `ASCENDER`.
     ///
-    /// Randomness is seeded by the words themselves (plus `seed`, per document),
-    /// so editing one word never re-shuffles the letters of the others.
+    /// Randomness is seeded by the words themselves and how often each occurred
+    /// before (plus `seed`, per document), so editing one word never
+    /// re-shuffles the letters of the others.
     pub fn render_paragraph(
         &self,
         text: &str,
@@ -447,7 +468,7 @@ impl EngineCore {
             let end = (i..chars.len()).find(|&k| chars[k].is_whitespace()).unwrap_or(chars.len());
             let word: String = chars[i..end].iter().collect();
             let hash = hash_str(&word);
-            let occurrence = seen.entry(hash).or_insert(0);
+            let occurrence = seen.entry(hash).or_insert_with(|| styles.seen.get(&word).copied().unwrap_or(0));
             let wseed = mix(mix(doc_seed, hash), *occurrence);
             *occurrence += 1;
             let char_style = |k: usize| CharStyle {
@@ -581,10 +602,16 @@ impl EngineCore {
             match self.keys.get(&key) {
                 Some(data) => {
                     // Abbreviation letters stand alone; the first letter of a word prefers
-                    // variants written without a joining entry, the others joining ones.
+                    // variants written without a joining entry, the others joining ones;
+                    // the last letter goes without a tail.
+                    let letter = key.chars().all(char::is_alphabetic);
+                    let after_letter = i > 0 && chars[i - 1].is_alphabetic();
+                    let before_letter = chars.get(i + take).is_some_and(|c| c.is_alphabetic());
                     let position = if isolated(i) {
                         Position::Isolated
-                    } else if i == 0 {
+                    } else if letter && !before_letter {
+                        if after_letter { Position::Final } else { Position::Single }
+                    } else if !after_letter {
                         Position::Initial
                     } else {
                         Position::Medial
@@ -596,17 +623,16 @@ impl EngineCore {
                         }
                     }
                     let joined = prev_exit.is_some() && ink.entry.is_some();
-                    let (mut polys, mut pl) = self.finish(&ink);
-                    if (scale - 1.0).abs() > 1e-6 {
-                        // Bigger or smaller letter: scale around its origin on the baseline.
-                        for c in polys.iter_mut() {
-                            for p in c.iter_mut() {
-                                *p = [pl.origin_x + (p[0] - pl.origin_x) * scale, p[1] * scale];
-                            }
+                    let (mut polys, mut pl, mut profile) = self.placed(&ink, scale);
+                    // Joined letters are placed by their anchors alone; when the bodies would
+                    // still run into each other, the connection is drawn that much longer.
+                    if let (true, Some((pp, padv)), Some(e)) = (joined, prev_profile.as_ref(), ink.entry) {
+                        let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
+                        let need = joined_overlap(&right_rel, &profile.left, e.y * scale, style.weight + 70.0, (style.weight * 0.4).max(8.0));
+                        if need > 6.0 && stretch_entry(&mut ink, (need / scale).min(400.0)) {
+                            (polys, pl, profile) = self.placed(&ink, scale);
                         }
-                        pl.advance *= scale;
                     }
-                    let profile = Profile::of(&polys, -pl.origin_x);
                     if let (false, true, Some((pp, padv))) = (joined, style.kerning, prev_profile.as_ref()) {
                         let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
                         let k = pair_kern(&right_rel, &profile.left, style.letter_spacing);
@@ -833,6 +859,20 @@ mod tests {
         let sub = e.render_paragraph("ж1", 9000.0, 1500.0, 1, &HashMap::new(), &sub);
         assert!((sub.fallback[1].y - plain.fallback[1].y - 180.0).abs() < 1e-6, "subscript 180 units lower");
         assert_eq!(sub.fallback[0].y, plain.fallback[0].y, "the letter itself stays");
+    }
+
+    #[test]
+    fn a_word_repeated_in_other_paragraphs_gets_new_letters() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "м", 300.0, false), wave_sample("2", "м", 360.0, false), wave_sample("3", "м", 240.0, false)]);
+        let render = |before: u64| {
+            let styles = CharStyles { seen: HashMap::from([("м".to_string(), before)]), ..Default::default() };
+            e.render_paragraph("м", 9000.0, 1500.0, 1, &HashMap::new(), &styles).d
+        };
+        let first = render(0);
+        assert_eq!(first, e.render_paragraph("м", 9000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default()).d);
+        let all: std::collections::BTreeSet<String> = (0..6).map(render).collect();
+        assert!(all.len() >= 3, "a lone letter differs from paragraph to paragraph: {} kinds", all.len());
     }
 
     #[test]

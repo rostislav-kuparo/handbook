@@ -5,16 +5,20 @@ import { FALLBACK_FONTS, HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
 import { heightOf } from '../sketch/render';
-import { SketchFigure } from '../sketch/SketchFigure';
-import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes } from './layout';
+import { DrawPenContext, SketchFigure } from '../sketch/SketchFigure';
+import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes, wordsSeen } from './layout';
 import { flowPages, placeFloats } from './inkPages';
-import { SHEET_GAP, SHEET_H, SHEET_W, type Geometry, type PaperStyle } from './page';
-import { PageContext, paperVars, Sheet } from './Paper';
+import { SHEET_GAP, SHEET_H, SHEET_W, type DrawPen, type Geometry, type PaperStyle } from './page';
+import { numberOf, PageContext, paperVars, Sheet } from './Paper';
 
 interface Props {
   docId: string;
   /** Title on top of the first sheet; null when the document hides it. */
   title: string | null;
+  /** Number of the first sheet; null: sheets are not numbered. */
+  firstNumber: number | null;
+  /** What the document's drawings are drawn with. */
+  drawPen: DrawPen;
   content: DocContent;
   fontSize: number;
   geo: Geometry;
@@ -35,7 +39,7 @@ function inkProps(color: number, palette: string[]) {
  * and lines are uneven like on real paper. Lines and blocks flow onto A4
  * sheets; this is also what gets printed (one sheet per PDF page).
  */
-export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRendered }: Props) {
+export function InkView({ docId, title, firstNumber, drawPen, content, fontSize, geo, paper, ink, onRendered }: Props) {
   const [renders, setRenders] = useState<(ParagraphRender | null)[]>([]);
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState(true);
@@ -48,9 +52,10 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
   const titleH = title === null ? 0 : 2 * lh;
 
   // Text, sizes and colours of every paragraph; the palette maps colour indices to colours.
-  const { runs, palette } = useMemo(() => {
+  const { runs, seen, palette } = useMemo(() => {
     const pal = new InkPalette(ink);
-    return { runs: nodes.map((n) => (n.type === 'paragraph' ? paragraphRuns(n, pal) : null)), palette: pal.colors };
+    const runs = nodes.map((n) => (n.type === 'paragraph' ? paragraphRuns(n, pal) : null));
+    return { runs, seen: wordsSeen(runs.map((r) => r?.text ?? null)), palette: pal.colors };
   }, [nodes, ink]);
 
   useEffect(() => {
@@ -61,10 +66,10 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
     const total = Math.max(1, runs.reduce((a, r) => a + (r ? r.text.length + 1 : 0), 0));
     let done = 0;
     Promise.all(
-      runs.map((r) =>
+      runs.map((r, i) =>
         r
           ? engine
-              .renderParagraph(r.text, unitsWidth, LINE_HEIGHT_UNITS, docSeed(docId), { scales: r.scales, colors: r.colors, shifts: r.shifts })
+              .renderParagraph(r.text, unitsWidth, LINE_HEIGHT_UNITS, docSeed(docId), { scales: r.scales, colors: r.colors, shifts: r.shifts, seen: seen[i] })
               .then((out) => {
                 done += r.text.length + 1;
                 if (alive) setProgress(done / total);
@@ -81,7 +86,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
     return () => {
       alive = false;
     };
-  }, [runs, fontSize, fontVersion, docId, style.sag, style.lineJitter, geo.contentW]);
+  }, [runs, seen, fontSize, fontVersion, docId, style.sag, style.lineJitter, geo.contentW]);
 
   // Flow lines and blocks onto sheets (the PNG/SVG export uses the same layout).
   // A drawing knows its height before it is drawn; an HTML block reports it once loaded.
@@ -103,6 +108,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
 
   return (
     <PageContext.Provider value={geo}>
+      <DrawPenContext.Provider value={drawPen}>
       <div className="ink-stack" style={{ ...paperVars(fontSize, ink), width: SHEET_W }}>
         {busy && (
           <div className="ink-progress no-print" role="progressbar" aria-valuenow={Math.round(progress * 100)}>
@@ -113,7 +119,15 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
           </div>
         )}
         {Array.from({ length: pageCount }, (_, p) => (
-          <Sheet key={p} index={p} geo={geo} paper={paper} fontSize={fontSize} style={{ position: 'relative', height: SHEET_H, marginBottom: SHEET_GAP }}>
+          <Sheet
+            key={p}
+            index={p}
+            number={numberOf(firstNumber, p)}
+            geo={geo}
+            paper={paper}
+            fontSize={fontSize}
+            style={{ position: 'relative', height: SHEET_H, marginBottom: SHEET_GAP }}
+          >
             <div className="sheet-content" style={{ left: geo.margin.left, top: geo.margin.top, width: geo.contentW, height: geo.contentH }}>
               {p === 0 && title !== null && (
                 <div className="page-title ink-title" style={{ fontFamily: HAND_FONT_STACK }}>
@@ -126,7 +140,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
                   if (a.kind === 'sketch') {
                     return (
                       <div key={`b${it.node}`} className="ink-block" style={{ top: it.y }}>
-                        <SketchFigure code={String(a.code ?? '')} width={geo.contentW} fontSize={fontSize} />
+                        <SketchFigure code={String(a.code ?? '')} pen={a.pen} width={geo.contentW} fontSize={fontSize} />
                       </div>
                     );
                   }
@@ -178,7 +192,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
               .map((f) => (
                 <div key={`f${f.i}`} className="ink-float" style={{ top: f.top, left: f.left, width: f.width }}>
                   {f.attrs.kind === 'sketch' ? (
-                    <SketchFigure code={String(f.attrs.code ?? '')} width={f.width} fontSize={fontSize} />
+                    <SketchFigure code={String(f.attrs.code ?? '')} pen={f.attrs.pen} width={f.width} fontSize={fontSize} />
                   ) : (
                     <BlockFrame code={String(f.attrs.code ?? '')} data={f.attrs.data} title={String(f.attrs.title ?? 'Блок')} />
                   )}
@@ -190,6 +204,7 @@ export function InkView({ docId, title, content, fontSize, geo, paper, ink, onRe
           <p className="ink-missing no-print">Ещё не написаны (показаны обычным шрифтом): {missing.join(' ')}</p>
         )}
       </div>
+      </DrawPenContext.Provider>
     </PageContext.Provider>
   );
 }

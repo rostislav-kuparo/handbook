@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { DrawPenPicker } from '../sketch/DrawPenPicker';
 import { INK_COLORS, MARGIN_PRESETS, type PageSetup, type PaperStyle } from './page';
 
 /** A tiny sheet of paper (16×22) for the icons. */
@@ -58,7 +59,7 @@ interface Props {
   onFontSize: (px: number) => void;
 }
 
-/** Page setup of the open document: letter size, paper, margins, title, pen colour. */
+/** Page setup of the open document: letter size, paper, margins, drawing pen, title, page numbers, pen colour. */
 export function PageMenu({ setup, onChange, fontSize, onFontSize }: Props) {
   const same = (m: PageSetup['margins']) => SIDES.every((s) => m[s.key] === setup.margins[s.key]);
   return (
@@ -120,11 +121,34 @@ export function PageMenu({ setup, onChange, fontSize, onFontSize }: Props) {
           ))}
         </div>
 
+        <div className="page-menu-drawings">
+          <span className="small">Чертежи</span>
+          <DrawPenPicker value={setup.drawPen} textInk={setup.ink} onChange={(drawPen) => onChange({ ...setup, drawPen })} />
+        </div>
+
         <div className="page-menu-foot">
           <label className="check inline">
             <input type="checkbox" checked={setup.showTitle} onChange={(e) => onChange({ ...setup, showTitle: e.target.checked })} />
             Название на листе
           </label>
+          <div className="numbering-row">
+            <label className="check inline">
+              <input type="checkbox" checked={setup.pageNumbers} onChange={(e) => onChange({ ...setup, pageNumbers: e.target.checked })} />
+              Нумерация страниц
+            </label>
+            {setup.pageNumbers && (
+              <label className="first-number" title="Номер первого листа">
+                с
+                <input
+                  type="number"
+                  min={0}
+                  max={9999}
+                  value={setup.firstNumber}
+                  onChange={(e) => onChange({ ...setup, firstNumber: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+                />
+              </label>
+            )}
+          </div>
           <div className="swatches" role="group" aria-label="Цвет чернил">
             {INK_COLORS.map((c) => (
               <button

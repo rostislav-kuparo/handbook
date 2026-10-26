@@ -3,9 +3,10 @@ import { FALLBACK_FONTS } from '../engine/constants';
 import { getHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
 import { drawingBody, drawSketch, heightOf, penFor, sketchLayout } from '../sketch/render';
+import { drawPenOf, type DrawPen } from './page';
 import { safeFilename, saveFile } from '../util/download';
 import { blockSpan, flowPages, placeFloats, titleHeight } from './inkPages';
-import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes } from './layout';
+import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes, wordsSeen } from './layout';
 import { SHEET_H, SHEET_W, type Geometry, type PaperStyle } from './page';
 
 const PAPER = '#fbf7ee';
@@ -22,6 +23,10 @@ export interface PageExport {
   geo: Geometry;
   paper: PaperStyle;
   ink: string;
+  /** Number of the first sheet; null: sheets are not numbered. */
+  firstNumber: number | null;
+  /** What the document's drawings are drawn with. */
+  drawPen: DrawPen;
 }
 
 /** Paper colours of the light theme (exports are always on light paper). */
@@ -77,11 +82,14 @@ export async function documentPages(o: PageExport): Promise<string[]> {
   const palette = new InkPalette(o.ink);
   const color = (c: number) => palette.colors[c] ?? o.ink;
 
+  const runs = nodes.map((n) => (n.type === 'paragraph' ? paragraphRuns(n, palette) : null));
+  const seen = wordsSeen(runs.map((r) => r?.text ?? null));
   const renders: (ParagraphRender | null)[] = [];
-  for (const n of nodes) {
-    const run = n.type === 'paragraph' ? paragraphRuns(n, palette) : null;
+  for (const [i, run] of runs.entries()) {
     renders.push(
-      run ? await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, { scales: run.scales, colors: run.colors, shifts: run.shifts }) : null,
+      run
+        ? await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, { scales: run.scales, colors: run.colors, shifts: run.shifts, seen: seen[i] })
+        : null,
     );
   }
   const title = o.showTitle && o.title.trim() ? o.title : null;
@@ -102,11 +110,11 @@ export async function documentPages(o: PageExport): Promise<string[]> {
     titleH,
     geo.contentH,
   );
-  /** A drawing in the user's hand, as on screen, with the document's pen colour. */
-  const pen = penFor(getHandwriting().style, fontSize);
+  /** A drawing in the user's hand, as on screen: its pen or pencil, the document's ink. */
   const sketchAt = async (a: Record<string, unknown>, x: number, y: number, width: number) => {
-    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, pen));
-    return `<svg x="${x}" y="${y}" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, o.ink)}</svg>`;
+    const draw = drawPenOf(o.drawPen, a.pen);
+    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, penFor(getHandwriting().style, fontSize, draw.tool)));
+    return `<svg x="${x}" y="${y}" width="${d.width}" height="${d.height}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, o.ink, draw)}</svg>`;
   };
   const floats = placeFloats(nodes, geo, titleH);
   const pageCount = Math.max(pages.length, ...floats.map((f) => f.page + 1));
@@ -140,12 +148,15 @@ export async function documentPages(o: PageExport): Promise<string[]> {
       if (isSketch(f.attrs)) floating.push(await sketchAt(f.attrs, f.left, f.top, f.width));
       else floating.push(blockFrame(f.left, f.top, f.width, Number(f.attrs.height) || 260, String(f.attrs.title ?? 'Блок')));
     }
-    const number = `<text x="${SHEET_W / 2}" y="${SHEET_H - Math.min(28, geo.margin.bottom / 2.5) - 3}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#6b7390">${p + 1}</text>`;
+    const number =
+      o.firstNumber === null
+        ? ''
+        : `<text x="${SHEET_W / 2}" y="${SHEET_H - Math.min(28, geo.margin.bottom / 2.5) - 3}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#6b7390">${o.firstNumber + p}</text>`;
     out.push(
       `<svg xmlns="http://www.w3.org/2000/svg" width="${SHEET_W}" height="${SHEET_H}" viewBox="0 0 ${SHEET_W} ${SHEET_H}">` +
         `<rect width="100%" height="100%" fill="${PAPER}"/>${paperSvg(o.paper, geo, lh, baseline)}` +
         `<g transform="translate(${geo.margin.left} ${geo.margin.top})" font-family='${FALLBACK_FONTS}'>${body.join('')}</g>` +
-        `${floating.join('')}${pageCount > 1 ? number : ''}</svg>`,
+        `${floating.join('')}${number}</svg>`,
     );
   }
   return out;

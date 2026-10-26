@@ -5,8 +5,11 @@
 //! aligned. Principal component analysis then finds the directions in which
 //! *this* writer's variants actually differ — a bigger loop together with a
 //! longer tail, a steeper stem with a narrower bowl. New variants are drawn
-//! from that learned Gaussian: they look like plausible siblings of what was
-//! written, not like a straight blend of two samples.
+//! around one of the written variants: they look like plausible siblings of
+//! what was written, not like a blend of all of them (an average of loops of
+//! different sizes is no loop at all — «е» would turn into «с»). A variant
+//! that still strays too far (a loop gone, proportions off) is replaced by the
+//! written one it came from.
 //!
 //! PCA uses the dual (Gram matrix) form because there are few samples (n) and
 //! many coordinates (d): eigen-decompose the n×n matrix X·Xᵀ with Jacobi
@@ -30,10 +33,19 @@ struct GroupModel {
     /// Whether the group's samples have a connecting entry / exit (part of the vector).
     entry: bool,
     exit: bool,
-    mean: Vec<f64>,
+    /// The written variants as vectors: new ones start from one of them.
+    rows: Vec<Vec<f64>>,
     /// (standard deviation, unit direction)
     comps: Vec<(f64, Vec<f64>)>,
 }
+
+/// How far around a written variant a new one may go, per unit of fantasy.
+/// The written variant already sits about one deviation from the mean.
+const SPREAD: f64 = 0.7;
+/// A new variant may turn this much more or less than the written one (radians, per stroke).
+const MAX_TURN_CHANGE: f64 = 1.6;
+/// …and change its width-to-height ratio by this share.
+const MAX_RATIO_CHANGE: f64 = 0.3;
 
 #[derive(Clone, Debug, Default)]
 pub struct ShapeModel {
@@ -84,15 +96,68 @@ impl ShapeModel {
                 false
             }
         })?;
-        let mut v = g.mean.clone();
-        for (sigma, u) in &g.comps {
-            let z = rng.gauss() * fantasy.clamp(0.0, 3.0);
-            for (vi, ui) in v.iter_mut().zip(u) {
-                *vi += sigma * z * ui;
+        let base = &g.rows[rng.below(g.rows.len())];
+        let written = devectorize(base, &g.counts, g.entry, g.exit);
+        let spread = fantasy.clamp(0.0, 3.0) * SPREAD;
+        if g.comps.is_empty() || spread <= 0.0 {
+            return Some(written);
+        }
+        for _ in 0..3 {
+            let mut v = base.clone();
+            for (sigma, u) in &g.comps {
+                let z = rng.gauss() * spread;
+                for (vi, ui) in v.iter_mut().zip(u) {
+                    *vi += sigma * z * ui;
+                }
+            }
+            let fresh = devectorize(&v, &g.counts, g.entry, g.exit);
+            if plausible(&fresh.0, &written.0) {
+                return Some(fresh);
             }
         }
-        Some(devectorize(&v, &g.counts, g.entry, g.exit))
+        Some(written)
     }
+}
+
+/// Total signed turning of a stroke, radians: about ±2π for a loop, ±π for «с».
+fn turning(s: &[Pt]) -> f64 {
+    let pts: Vec<&Pt> = {
+        // Skip points closer than a few units: jitter there says nothing about the shape.
+        let mut out: Vec<&Pt> = Vec::with_capacity(s.len());
+        for p in s {
+            if out.last().is_none_or(|q| q.dist(p) >= 6.0) {
+                out.push(p);
+            }
+        }
+        out
+    };
+    let mut total = 0.0;
+    for w in pts.windows(3) {
+        let (ax, ay) = (w[1].x - w[0].x, w[1].y - w[0].y);
+        let (bx, by) = (w[2].x - w[1].x, w[2].y - w[1].y);
+        total += (ax * by - ay * bx).atan2(ax * bx + ay * by);
+    }
+    total
+}
+
+/// Width-to-height ratio of the ink (heights below a dot's size count as one).
+fn ratio(strokes: &[Stroke]) -> f64 {
+    let b = strokes_bbox(strokes);
+    if b.is_empty() {
+        return 1.0;
+    }
+    b.width().max(20.0) / (b.y_max - b.y_min).max(20.0)
+}
+
+/// A new variant keeps the character of the written one it grew from: the
+/// same loops and turns in every stroke and roughly the same proportions.
+fn plausible(fresh: &[Stroke], written: &[Stroke]) -> bool {
+    if fresh.len() != written.len() {
+        return false;
+    }
+    let turns = fresh.iter().zip(written).all(|(a, b)| a.len() < 3 || (turning(a) - turning(b)).abs() <= MAX_TURN_CHANGE);
+    let (ra, rb) = (ratio(fresh), ratio(written));
+    turns && (ra / rb - 1.0).abs() <= MAX_RATIO_CHANGE
 }
 
 fn reversed(reference: &[Pt], s: &[Pt]) -> bool {
@@ -202,7 +267,7 @@ fn fit_group(members: &[&Prepared]) -> GroupModel {
         counts,
         entry: first.topology().entry.is_some(),
         exit: first.topology().exit.is_some(),
-        mean,
+        rows,
         comps,
     }
 }
@@ -298,6 +363,48 @@ mod tests {
             assert!((w - h).abs() < 6.0, "generated arch keeps the learned proportion: {w} x {h}");
             assert!(h > 200.0 && h < 520.0);
         }
+    }
+
+    /// «е»: a loop and then a «с» curve, one stroke; `r` is the loop size.
+    fn e_letter(r: f64, tail: f64) -> Prepared {
+        let mut pts: Vec<Pt> = (0..=30).map(|i| Pt::new(40.0 + i as f64 * (2.0 * r) / 30.0, 220.0, 0.5)).collect();
+        // Up and around counter-clockwise from the bar's right end, then down and out to the right.
+        pts.extend((1..=60).map(|i| {
+            let t = i as f64 / 60.0 * (std::f64::consts::TAU * 0.85);
+            Pt::new(40.0 + r + r * t.cos(), 220.0 + r * t.sin(), 0.5)
+        }));
+        let last = *pts.last().unwrap();
+        pts.extend((1..=10).map(|i| Pt::new(last.x + i as f64 * tail / 10.0, last.y - i as f64 * 4.0, 0.5)));
+        Prepared { strokes: vec![pts], entry: None, exit: None }
+    }
+
+    #[test]
+    fn generated_variants_keep_the_loop() {
+        // Loops of rather different sizes: their average would blur the loop away.
+        let samples: Vec<Prepared> = [(150.0, 40.0), (200.0, 120.0), (120.0, 90.0), (180.0, 20.0)].iter().map(|&(r, t)| e_letter(r, t)).collect();
+        let written: Vec<f64> = samples.iter().map(|s| turning(&s.strokes[0])).collect();
+        let model = ShapeModel::fit(&samples);
+        let mut rng = Rng::new(3);
+        for _ in 0..40 {
+            let (strokes, _, _) = model.sample(&mut rng, 2.0).unwrap();
+            let t = turning(&strokes[0]);
+            assert!(written.iter().any(|w| (w - t).abs() <= MAX_TURN_CHANGE + 1e-9), "loop kept: {t} vs {written:?}");
+        }
+    }
+
+    #[test]
+    fn no_fantasy_gives_the_written_variants_in_turn() {
+        let samples: Vec<Prepared> = (0..4).map(|i| arch(300.0 + i as f64 * 60.0, 300.0)).collect();
+        let model = ShapeModel::fit(&samples);
+        let mut rng = Rng::new(5);
+        let heights: std::collections::BTreeSet<i64> = (0..40)
+            .map(|_| {
+                let (strokes, _, _) = model.sample(&mut rng, 0.0).unwrap();
+                let b = strokes_bbox(&strokes);
+                (b.y_max - b.y_min).round() as i64
+            })
+            .collect();
+        assert_eq!(heights.len(), 4, "every written variant shows up, nothing in between: {heights:?}");
     }
 
     #[test]

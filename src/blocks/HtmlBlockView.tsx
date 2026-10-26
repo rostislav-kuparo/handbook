@@ -6,10 +6,11 @@ import type { HtmlBlockAttrs } from './HtmlBlock';
 import { buildSrcdoc, HostToBlock, isBlockMessage } from './runtime';
 import { useVendor } from './useVendor';
 import { LINE_HEIGHT_EM } from '../editor/layout';
-import { SHEET_W } from '../editor/page';
+import { drawPenOf, SHEET_W } from '../editor/page';
 import { PageContext } from '../editor/Paper';
 import { compileSketch } from '../sketch/evaluate';
-import { SketchFigure } from '../sketch/SketchFigure';
+import { DrawPenContext, SketchFigure } from '../sketch/SketchFigure';
+import { DrawPenPicker } from '../sketch/DrawPenPicker';
 import { SketchHelp } from '../sketch/SketchHelp';
 import { SketchPanel } from '../sketch/SketchPanel';
 
@@ -213,7 +214,7 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
         onPointerDown={(e) => {
           // A floating block is dragged by its whole header; the title is edited with a double click.
           const target = e.target as HTMLElement;
-          if (!attrs.float || target.closest('button')) return;
+          if (!attrs.float || target.closest('button, .pen-menu')) return;
           if (target.matches('input') && document.activeElement === target) return;
           startDrag(e, 'move');
         }}
@@ -247,6 +248,7 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
           </button>
           {sketch ? (
             <>
+              <PenMenu pen={attrs.pen} onChange={(pen) => updateAttributes({ pen })} />
               <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
                 Команды
               </button>
@@ -275,7 +277,7 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
 
       {sketch ? (
         <>
-          <SketchFigure code={attrs.code} placeholder="Пустой чертёж: напишите команды ниже или вставьте ответ нейронки. «? Справка» — все команды и готовый запрос." />
+          <SketchFigure code={attrs.code} pen={attrs.pen} placeholder="Пустой чертёж: напишите команды ниже или вставьте ответ нейронки. «? Справка» — все команды и готовый запрос." />
           {sketchErrors > 0 && !panel && (
             <button className="sketch-badge no-print" contentEditable={false} onClick={() => setPanel('code')}>
               ⚠ Строк с ошибками: {sketchErrors} — открыть команды
@@ -337,5 +339,41 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
         <span className="resize-handle" contentEditable={false} onPointerDown={(e) => startDrag(e, 'resize')} title="Ширина блока" />
       )}
     </NodeViewWrapper>
+  );
+}
+
+/** «Перо» in a drawing's header: pen or pencil and its colour for this drawing, or the document's. */
+function PenMenu({ pen, onChange }: { pen: Record<string, unknown> | null; onChange: (pen: Record<string, unknown> | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const value = drawPenOf(useContext(DrawPenContext), pen);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', outside);
+    return () => document.removeEventListener('mousedown', outside);
+  }, [open]);
+
+  // The document's ink, for the «auto» swatch (the sheet sets it as a CSS variable).
+  const textInk = (ref.current && getComputedStyle(ref.current).getPropertyValue('--ink-base').trim()) || '#1f2a6b';
+  return (
+    <div className="pen-menu-wrap" ref={ref}>
+      <button className={open ? 'on' : ''} onClick={() => setOpen(!open)} title="Чем нарисован этот чертёж: ручкой или карандашом, каким цветом">
+        {value.tool === 'pencil' ? '✎ Карандаш' : '✒ Ручка'} ▾
+      </button>
+      {open && (
+        <div className="menu-items pen-menu">
+          <label className="check inline small">
+            <input type="checkbox" checked={pen === null} onChange={(e) => onChange(e.target.checked ? null : { ...value })} />
+            Как во всём документе
+          </label>
+          <DrawPenPicker value={value} textInk={textInk} onChange={(next) => onChange({ ...next })} />
+          <p className="muted small">Для всех чертежей документа — в меню «Лист».</p>
+        </div>
+      )}
+    </div>
   );
 }

@@ -8,13 +8,42 @@ export const PITCH = SHEET_H + SHEET_GAP;
 
 export type PaperStyle = 'ruled' | 'grid' | 'plain';
 
-/** Page setup of a document: margins in millimetres, paper look, pen colour. */
+/**
+ * What the drawings («Чертёж») are drawn with: a pen or a pencil, in a colour
+ * (null: the text's ink for a pen, graphite for a pencil).
+ */
+export interface DrawPen {
+  tool: 'pen' | 'pencil';
+  color: string | null;
+  /** Labels in the text's pen even when the lines are in pencil. */
+  labelsInPen: boolean;
+}
+
+export const DEFAULT_DRAW_PEN: DrawPen = { tool: 'pen', color: null, labelsInPen: false };
+
+/** A drawing's own pen over the document's: what the drawing does not set comes from `base`. */
+export function drawPenOf(base: DrawPen, own: unknown): DrawPen {
+  const o = (own && typeof own === 'object' ? own : {}) as Partial<DrawPen>;
+  return {
+    tool: o.tool === 'pen' || o.tool === 'pencil' ? o.tool : base.tool,
+    color: 'color' in o && (o.color === null || typeof o.color === 'string') ? o.color : base.color,
+    labelsInPen: typeof o.labelsInPen === 'boolean' ? o.labelsInPen : base.labelsInPen,
+  };
+}
+
+/** Page setup of a document: margins in millimetres, paper look, pen colour, numbering, drawing pen. */
 export interface PageSetup {
   margins: { top: number; bottom: number; left: number; right: number };
   paper: PaperStyle;
   ink: string;
   /** Show the document title at the top of the first sheet. */
   showTitle: boolean;
+  /** Number the sheets at the bottom. */
+  pageNumbers: boolean;
+  /** Number of the first sheet (a continuation of another notebook starts at 7). */
+  firstNumber: number;
+  /** What the document's drawings are drawn with (each drawing may choose its own). */
+  drawPen: DrawPen;
 }
 
 export const DEFAULT_PAGE: PageSetup = {
@@ -22,6 +51,9 @@ export const DEFAULT_PAGE: PageSetup = {
   paper: 'ruled',
   ink: '#1f2a6b',
   showTitle: true,
+  pageNumbers: true,
+  firstNumber: 1,
+  drawPen: DEFAULT_DRAW_PEN,
 };
 
 export const MARGIN_PRESETS: { name: string; margins: PageSetup['margins'] }[] = [
@@ -43,7 +75,15 @@ export function pageSetup(raw: Partial<PageSetup> | undefined): PageSetup {
     paper: raw?.paper ?? DEFAULT_PAGE.paper,
     ink: raw?.ink ?? DEFAULT_PAGE.ink,
     showTitle: raw?.showTitle ?? DEFAULT_PAGE.showTitle,
+    pageNumbers: raw?.pageNumbers ?? DEFAULT_PAGE.pageNumbers,
+    firstNumber: Math.round(Math.min(Math.max(Number(raw?.firstNumber ?? DEFAULT_PAGE.firstNumber) || 0, 0), 9999)),
+    drawPen: drawPenOf(DEFAULT_DRAW_PEN, raw?.drawPen),
   };
+}
+
+/** Number printed on sheet `index` (from 0), or null when the sheets are not numbered. */
+export function sheetNumber(setup: Pick<PageSetup, 'pageNumbers' | 'firstNumber'>, index: number): number | null {
+  return setup.pageNumbers ? setup.firstNumber + index : null;
 }
 
 /** Sheet geometry for a page setup, in stack pixels. */

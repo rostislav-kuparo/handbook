@@ -15,6 +15,8 @@ export interface HtmlBlockAttrs {
   x: number;
   y: number;
   w: number;
+  /** A drawing's own pen (Partial<DrawPen>); null: the document's. */
+  pen: Record<string, unknown> | null;
 }
 
 declare module '@tiptap/core' {
@@ -60,6 +62,7 @@ export const HtmlBlock = Node.create({
       x: { default: 0, rendered: false },
       y: { default: 0, rendered: false },
       w: { default: 360, rendered: false },
+      pen: { default: null, rendered: false },
     };
   },
 
@@ -77,6 +80,7 @@ export const HtmlBlock = Node.create({
           x: Number(el.getAttribute('data-x')) || 0,
           y: Number(el.getAttribute('data-y')) || 0,
           w: Number(el.getAttribute('data-w')) || 360,
+          pen: el.hasAttribute('data-pen') ? (parseJson(el.getAttribute('data-pen')) as Record<string, unknown>) : null,
         }),
       },
     ];
@@ -96,6 +100,7 @@ export const HtmlBlock = Node.create({
         'data-x': String(node.attrs.x),
         'data-y': String(node.attrs.y),
         'data-w': String(node.attrs.w),
+        ...(node.attrs.pen ? { 'data-pen': JSON.stringify(node.attrs.pen) } : {}),
       }),
     ];
   },

@@ -64,6 +64,27 @@ impl Profile {
     }
 }
 
+/// Height of the middle of a band.
+pub fn band_center(band: usize) -> f64 {
+    Y_MIN + (band as f64 + 0.5) * BAND
+}
+
+/// How far a joined letter must move right so its ink clears the previous
+/// letter (0 when it already does). Bands near the join line are skipped:
+/// there the two letters meet on purpose.
+pub fn joined_overlap(right_rel: &[f64], left: &[f64], join_y: f64, keep_out: f64, gap: f64) -> f64 {
+    let mut need: f64 = 0.0;
+    for i in 0..BANDS {
+        if (band_center(i) - join_y).abs() < keep_out {
+            continue;
+        }
+        if right_rel[i].is_finite() && left[i].is_finite() {
+            need = need.max(right_rel[i] + gap - left[i]);
+        }
+    }
+    need
+}
+
 fn band_of(y: f64) -> usize {
     (((y - Y_MIN) / BAND).floor().max(0.0) as usize).min(BANDS - 1)
 }
@@ -119,6 +140,21 @@ mod tests {
         let (left, _) = Profile::envelope(&[(po, 300.0 + 2.0 * sb)]);
         let k = pair_kern(&right_rel, &left, sb);
         assert!(k < -150.0, "Г + о should tighten a lot, got {k}");
+    }
+
+    #[test]
+    fn joined_letters_that_collide_are_moved_apart() {
+        // The previous letter's bowl reaches 80 units past its exit (high up);
+        // the next one starts right at its entry. They meet at the join line, y = 60.
+        let prev = vec![rect(0.0, 0.0, 380.0, 450.0)];
+        let next = vec![rect(0.0, 0.0, 300.0, 450.0)];
+        let (_, right_rel) = Profile::envelope(&[(Profile::of(&prev, 0.0), 300.0)]);
+        let (left, _) = Profile::envelope(&[(Profile::of(&next, 0.0), 300.0)]);
+        let need = joined_overlap(&right_rel, &left, 60.0, 120.0, 10.0);
+        assert!((need - 90.0).abs() < 1.0, "80 units of overlap plus the gap, got {need}");
+        let apart = Profile::of(&next, 100.0);
+        let (left, _) = Profile::envelope(&[(apart, 300.0)]);
+        assert_eq!(joined_overlap(&right_rel, &left, 60.0, 120.0, 10.0), 0.0);
     }
 
     #[test]

@@ -32,6 +32,26 @@ function applyTheme(theme: Theme) {
 // Before the first render, so the app never flashes in the wrong theme.
 applyTheme(readTheme());
 
+/**
+ * The window never scrolls: only the panels inside it do. The CSS stops the
+ * wheel and the touchpad bounce; this puts the app back when something else
+ * shifted it anyway (a focus or scrollIntoView reaching past the panels).
+ */
+function pinWindow() {
+  const pinned = (el: EventTarget | null) =>
+    el === document || el === document.documentElement || el === document.body || (el instanceof HTMLElement && (el.id === 'root' || el.classList.contains('app')));
+  document.addEventListener(
+    'scroll',
+    (e) => {
+      if (!pinned(e.target)) return;
+      const el = e.target === document ? document.documentElement : (e.target as HTMLElement);
+      if (el.scrollTop || el.scrollLeft) el.scrollTo(0, 0);
+    },
+    { capture: true, passive: true },
+  );
+}
+pinWindow();
+
 /** App theme: system / light / dark (a per-device preference). */
 function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(readTheme);

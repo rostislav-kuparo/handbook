@@ -11,7 +11,7 @@ import { useLive } from '../util/useLive';
 import { exportDocumentJson, exportFont, exportPng, exportSvg } from './exporters';
 import { HandEditor } from './HandEditor';
 import { InkView } from './InkView';
-import { geometry, pageSetup, type PageSetup } from './page';
+import { geometry, pageSetup, sheetNumber, type PageSetup } from './page';
 import { PageMenu } from './PageMenu';
 import { RenderMenu } from './RenderMenu';
 import { SymbolsMenu } from './SymbolsMenu';
@@ -51,6 +51,8 @@ export function Documents() {
   const [loaded, setLoaded] = useState<{ id: string; content: DocContent } | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<number | undefined>(undefined);
+  /** The rendered view has finished writing: printing can start right away. */
+  const inkReady = useRef(false);
   const { samples, fontBytes } = useHandwriting();
 
   // Restore UI state; create the welcome document on first launch.
@@ -72,6 +74,7 @@ export function Documents() {
 
   const doc = docs?.find((d) => d.id === currentId) ?? null;
   const setup = pageSetup(doc?.page);
+  const firstNumber = sheetNumber(setup, 0);
   const marginsKey = JSON.stringify(setup.margins);
   // The title toggle is part of the key too: a new geometry makes the editor re-paginate.
   const geo = useMemo(() => geometry(setup), [marginsKey, setup.showTitle]);
@@ -155,9 +158,20 @@ export function Documents() {
     geo,
     paper: setup.paper,
     ink: setup.ink,
+    firstNumber,
+    drawPen: setup.drawPen,
   });
 
+  useEffect(() => {
+    if (!ink) inkReady.current = false;
+  }, [ink]);
+
   const print = () => {
+    // Already rendered: nothing is going to finish rendering, so print now.
+    if (ink && inkReady.current) {
+      window.print();
+      return;
+    }
     setInk(true);
     setPrintPending(true);
   };
@@ -314,12 +328,15 @@ export function Documents() {
               <InkView
                 docId={doc.id}
                 title={setup.showTitle ? doc.title : null}
+                firstNumber={firstNumber}
+                drawPen={setup.drawPen}
                 content={content}
                 fontSize={fontSize}
                 geo={geo}
                 paper={setup.paper}
                 ink={setup.ink}
                 onRendered={() => {
+                  inkReady.current = true;
                   if (printPending) {
                     setPrintPending(false);
                     setTimeout(() => window.print(), 400);
@@ -329,6 +346,8 @@ export function Documents() {
             ) : (
               <Paper
                 pages={pages}
+                firstNumber={firstNumber}
+                drawPen={setup.drawPen}
                 fontSize={fontSize}
                 geo={geo}
                 paper={setup.paper}

@@ -38,6 +38,23 @@ export function docSeed(docId: string): number {
   return h >>> 0;
 }
 
+/**
+ * For every paragraph (null for blocks): how many times each of its words
+ * occurred in the paragraphs above. The engine seeds a word by its text and
+ * this count, so «1.» or «і» look different in every paragraph while an edit
+ * re-shuffles only the repeats of the words it touched.
+ */
+export function wordsSeen(texts: (string | null)[]): Record<string, number>[] {
+  const total = new Map<string, number>();
+  return texts.map((text) => {
+    const words = text ? text.split(/\s+/).filter(Boolean) : [];
+    const seen: Record<string, number> = {};
+    for (const w of words) if (!(w in seen)) seen[w] = total.get(w) ?? 0;
+    for (const w of words) total.set(w, (total.get(w) ?? 0) + 1);
+    return seen;
+  });
+}
+
 /** Colours used in a document: index 0 is the document's pen, the rest come from coloured words. */
 export class InkPalette {
   readonly colors: string[];
