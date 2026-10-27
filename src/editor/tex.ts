@@ -244,19 +244,26 @@ export function convertTex(src: string, script?: ScriptKind): MathRun[] {
 }
 
 /**
- * Formulas inside ordinary text: $…$, $$…$$, \(…\), \[…\]. A lone dollar
- * ("$5 and $10") is left alone: the inner text may not start or end with a space
- * and the closing $ may not be followed by a digit.
+ * Formulas inside ordinary text: $…$, $$…$$, \(…\), \[…\], '''…''' (three
+ * apostrophes, as some notes mark them). A lone dollar ("$5 and $10") is left
+ * alone: the inner text may not start or end with a space and the closing $
+ * may not be followed by a digit.
  */
-const MATH_IN_TEXT = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?!\s)([^$\n]*?[^$\s\\])\$(?!\d)/g;
+const MATH_IN_TEXT = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?!\s)([^$\n]*?[^$\s\\])\$(?!\d)|['’]{3}([\s\S]+?)['’]{3}/g;
 
-/** Text with its formulas converted; null when there is no formula in it. */
+const texOf = (m: RegExpMatchArray) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? '';
+
+/** Determinants, matrices, systems: tables a line of text cannot hold (they become blocks of their own). */
+export const hasTable = (tex: string) => /\\begin\s*\{\s*(array|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix|cases)\s*\}/.test(tex);
+
+/** Text with its formulas converted; null when there is no formula in it. Formulas with tables stay as they are. */
 export function convertMathInText(text: string): MathRun[] | null {
   const out: MathRun[] = [];
   let last = 0;
   let found = false;
   for (const m of text.matchAll(MATH_IN_TEXT)) {
-    const tex = m[1] ?? m[2] ?? m[3] ?? m[4] ?? '';
+    const tex = texOf(m);
+    if (hasTable(tex)) continue;
     found = true;
     if (m.index! > last) out.push({ text: text.slice(last, m.index) });
     out.push(...convertTex(tex));
@@ -267,9 +274,28 @@ export function convertMathInText(text: string): MathRun[] | null {
   return out.filter((r) => r.text);
 }
 
+/**
+ * Text cut around its formulas with tables: the text between (its other
+ * formulas still in it) and the tables' formulas; null when it has none.
+ */
+export function splitTables(text: string): ({ text: string } | { tex: string })[] | null {
+  const out: ({ text: string } | { tex: string })[] = [];
+  let last = 0;
+  for (const m of text.matchAll(MATH_IN_TEXT)) {
+    const tex = texOf(m);
+    if (!hasTable(tex)) continue;
+    if (m.index! > last) out.push({ text: text.slice(last, m.index) });
+    out.push({ tex: tex.trim() });
+    last = m.index! + m[0].length;
+  }
+  if (!out.length) return null;
+  if (last < text.length) out.push({ text: text.slice(last) });
+  return out;
+}
+
 export function countMathInText(text: string): number {
   return [...text.matchAll(MATH_IN_TEXT)].length;
 }
 
-/** A $…$ formula just closed by typing the second $ (for the input rule). */
-export const TYPED_MATH = /(?:^|\s)(\$(?!\s)[^$\n]*?[^$\s\\]\$)$/;
+/** A $…$ (or '''…''') formula just closed by typing the second $ (for the input rule). */
+export const TYPED_MATH = /(?:^|\s)(\$(?!\s)[^$\n]*?[^$\s\\]\$|['’]{3}[^\n]+?['’]{3})$/;

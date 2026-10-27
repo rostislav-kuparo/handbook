@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CodeEditor } from '../blocks/CodeEditor';
-import { compileSketch } from './evaluate';
+import { sketchErrors } from './render';
 
 interface Props {
   code: string;
@@ -32,7 +32,7 @@ export function SketchPanel({ code, onChange, onHelp }: Props) {
     }, 300);
   };
 
-  const errors = useMemo(() => compileSketch(draft).errors, [draft]);
+  const errors = useMemo(() => sketchErrors(draft), [draft]);
 
   return (
     <>

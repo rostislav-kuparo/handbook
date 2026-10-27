@@ -1,7 +1,7 @@
 import { Extension, InputRule } from '@tiptap/core';
 import { Fragment, Slice, type Mark as PMMark, type Node as PMNode, type Schema } from '@tiptap/pm/model';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
-import { convertMathInText, convertTex, countMathInText, TYPED_MATH, type MathRun } from './tex';
+import { convertMathInText, convertTex, countMathInText, hasTable, splitTables, TYPED_MATH, type MathRun } from './tex';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -20,10 +20,36 @@ function runNodes(schema: Schema, runs: MathRun[], marks: readonly PMMark[]): PM
   );
 }
 
+/** A formula with a table (a determinant, a matrix): a «Формула» block, drawn by hand like a drawing. */
+function formulaBlock(schema: Schema, tex: string): PMNode {
+  return schema.nodes.htmlBlock.create({ kind: 'sketch', title: 'Формула', code: `$$${tex}$$` });
+}
+
+/**
+ * A paragraph with formulas holding tables, cut into paragraphs (their other
+ * formulas converted) and «Формула» blocks; null when it has none.
+ */
+function splitParagraph(schema: Schema, para: PMNode): PMNode[] | null {
+  const parts = splitTables(para.textContent);
+  if (!parts) return null;
+  const out: PMNode[] = [];
+  for (const p of parts) {
+    if ('tex' in p) out.push(formulaBlock(schema, p.tex));
+    else if (p.text.trim()) {
+      const runs = convertMathInText(p.text.trim()) ?? [{ text: p.text.trim() }];
+      out.push(schema.nodes.paragraph.create(para.attrs, runNodes(schema, runs, [])));
+    }
+  }
+  return out;
+}
+
 function convertFragment(schema: Schema, fragment: Fragment): Fragment {
   const out: PMNode[] = [];
   fragment.forEach((node) => {
-    if (node.isText) {
+    const split = node.type.name === 'paragraph' ? splitParagraph(schema, node) : null;
+    if (split) {
+      out.push(...split);
+    } else if (node.isText) {
       const runs = convertMathInText(node.text ?? '');
       out.push(...(runs ? runNodes(schema, runs, node.marks) : [node]));
     } else {
@@ -76,7 +102,10 @@ export const MathText = Extension.create({
           const source = match[1];
           const from = range.from + (match[0].length - source.length);
           const $from = state.doc.resolve(from);
-          const runs = convertTex(source.slice(1, -1));
+          const tex = source.startsWith('$') ? source.slice(1, -1) : source.slice(3, -3);
+          // A table does not fit on a line: «Распознать формулы» makes it a block of its own.
+          if (hasTable(tex)) return null;
+          const runs = convertTex(tex);
           if (runs.length === 0) return null;
           state.tr.replaceWith(from, range.to, runNodes(state.schema, runs, $from.marks()));
           // Go on writing on the line, not inside the index the formula may end with.
@@ -92,7 +121,15 @@ export const MathText = Extension.create({
         () =>
         ({ state, tr, dispatch }) => {
           const edits: { from: number; to: number; nodes: PMNode[] }[] = [];
-          state.doc.descendants((node, pos) => {
+          state.doc.descendants((node, pos, parent) => {
+            // A paragraph with a determinant or a matrix: cut into paragraphs and «Формула» blocks.
+            if (node.type.name === 'paragraph' && parent === state.doc) {
+              const split = splitParagraph(state.schema, node);
+              if (split) {
+                edits.push({ from: pos, to: pos + node.nodeSize, nodes: split });
+                return false;
+              }
+            }
             if (!node.isText) return;
             const runs = convertMathInText(node.text ?? '');
             if (runs) edits.push({ from: pos, to: pos + node.nodeSize, nodes: runNodes(state.schema, runs, node.marks) });

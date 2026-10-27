@@ -8,7 +8,7 @@ import { useVendor } from './useVendor';
 import { LINE_HEIGHT_EM } from '../editor/layout';
 import { drawPenOf, SHEET_W } from '../editor/page';
 import { PageContext } from '../editor/Paper';
-import { compileSketch } from '../sketch/evaluate';
+import { sketchErrors as errorsOf } from '../sketch/render';
 import { DrawPenContext, SketchFigure } from '../sketch/SketchFigure';
 import { DrawPenPicker } from '../sketch/DrawPenPicker';
 import { SketchHelp } from '../sketch/SketchHelp';
@@ -105,7 +105,7 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
 
   const applyCode = () => updateAttributes({ code: draftCode });
 
-  const sketchErrors = useMemo(() => (sketch ? compileSketch(attrs.code).errors.length : 0), [sketch, attrs.code]);
+  const sketchErrors = useMemo(() => (sketch ? errorsOf(attrs.code).length : 0), [sketch, attrs.code]);
   const insertIntoSketch = (snippet: string) => {
     const code = attrsRef.current.code;
     updateAttributes({ code: code.trim() ? `${code.replace(/\s*$/, '')}\n${snippet}` : snippet });

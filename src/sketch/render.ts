@@ -4,6 +4,7 @@ import type { DrawPen } from '../editor/page';
 import { FALLBACK_FONTS } from '../engine/constants';
 import type { Style } from '../model/types';
 import { compileSketch } from './evaluate';
+import { formulaOf, layoutFormula } from './formula';
 import { labelInk } from './labels';
 import { layoutSketch, placeLabels, sketchHeight, sketchScale, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
 import type { Pen } from './pen';
@@ -53,7 +54,8 @@ export function sketchLayout(code: string, width: number, fontSize: number, pen:
   const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${code}`;
   const hit = layouts.get(key);
   if (hit) return hit;
-  const layout = layoutSketch(compileSketch(code), width, fontSize, pen);
+  const tex = formulaOf(code);
+  const layout = tex !== null ? layoutFormula(tex, width, fontSize, pen) : layoutSketch(compileSketch(code), width, fontSize, pen);
   layouts.set(key, layout);
   if (layouts.size > 30) layouts.delete(layouts.keys().next().value!);
   return layout;
@@ -61,13 +63,20 @@ export function sketchLayout(code: string, width: number, fontSize: number, pen:
 
 /** Height in px at this width: known before anything is drawn, so pages can be laid out. */
 export function heightOf(code: string, width: number, fontSize: number): number {
+  const tex = formulaOf(code);
+  if (tex !== null) return layoutFormula(tex, width, fontSize, { width: 1, pressure: 0.5, jitter: 0.3 }).height;
   return sketchHeight(compileSketch(code), width, fontSize);
 }
 
 /** Where a drawing `width` px wide puts its origin, and px per unit along x and y. */
 export function scaleOf(code: string, width: number, fontSize: number) {
+  // A formula has no units to lay onto squares.
+  if (formulaOf(code) !== null) return { height: heightOf(code, width, fontSize), plotW: width, ox: 0, oy: 0, ppx: 0, ppy: 0 };
   return sketchScale(compileSketch(code), width, fontSize);
 }
+
+/** Mistakes in a drawing's code (none in a formula: it is written as it can be). */
+export const sketchErrors = (code: string) => (formulaOf(code) !== null ? [] : compileSketch(code).errors);
 
 /** Lines only: shown at once while the labels are being written. */
 export function linesOnly(layout: SketchLayout): Drawing {
