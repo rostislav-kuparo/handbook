@@ -29,7 +29,16 @@ export interface ParagraphRender {
   lineSkel?: { color: number; pts: number[] }[][];
   /** Characters without handwriting: drawn with a fallback font at these baseline positions. */
   fallback: { ch: string; x: number; y: number; line: number; scale: number; color: number }[];
+  /** The variants used last after this paragraph: pass it on to the next one (`CharStyles.deal`). */
+  deal: Deal;
 }
+
+/**
+ * Per letter, which of its written variants were used last (sample indices,
+ * the most recent last). Carried through a text in reading order, it keeps
+ * the same variant from turning up again and again.
+ */
+export type Deal = Record<string, number[]>;
 
 export interface EngineInfo {
   /** Keys written by the user. */
@@ -75,6 +84,8 @@ export interface CharStyles {
   seen?: Record<string, number>;
   /** Also return the strokes' centre lines with pressure (`lineSkel`). */
   skeleton?: boolean;
+  /** The previous paragraph's `deal` (none: the start of the text). */
+  deal?: Deal;
 }
 
 export const engine = {

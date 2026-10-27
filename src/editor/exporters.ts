@@ -1,8 +1,8 @@
-import { engine, type ParagraphRender } from '../engine/client';
+import { engine, type Deal, type ParagraphRender } from '../engine/client';
 import { FALLBACK_FONTS } from '../engine/constants';
 import { getHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
-import { drawingBody, drawSketch, heightOf, penFor, scaleOf, sketchLayout } from '../sketch/render';
+import { dealAfter, drawingBody, drawSketch, heightOf, penFor, scaleOf, sketchLayout } from '../sketch/render';
 import { drawPenOf, type DrawPen } from './page';
 import { safeFilename, saveFile } from '../util/download';
 import { blockSpan, flowPages, placeFloats, titleHeight } from './inkPages';
@@ -128,18 +128,30 @@ export async function documentPages(
   const runs = nodes.map((n) => (n.type === 'paragraph' ? paragraphRuns(n, palette) : null));
   const seen = wordsSeen(runs.map((r) => r?.text ?? null));
   const renders: (ParagraphRender | null)[] = [];
+  // In reading order, each paragraph going on with the variants the text before left unused — the labels
+  // of drawings and formulas in between too (as the rendered view does).
+  let deal: Deal | undefined;
+  /** The deal each drawing's labels go on from (by its attributes). */
+  const sketchDeals = new Map<unknown, Deal>();
   for (const [i, run] of runs.entries()) {
-    renders.push(
-      run
-        ? await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, {
-            scales: run.scales,
-            colors: run.colors,
-            shifts: run.shifts,
-            seen: seen[i],
-            skeleton: !!strokes,
-          })
-        : null,
-    );
+    const a = nodes[i].attrs;
+    if (a?.kind === 'sketch') {
+      const pen = penFor(getHandwriting().style, fontSize, drawPenOf(o.drawPen, a.pen));
+      sketchDeals.set(a, deal ?? {});
+      deal = await dealAfter(sketchLayout(String(a.code ?? ''), geo.contentW, fontSize, pen), deal ?? {});
+    }
+    const r = run
+      ? await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, {
+          scales: run.scales,
+          colors: run.colors,
+          shifts: run.shifts,
+          seen: seen[i],
+          skeleton: !!strokes,
+          deal,
+        })
+      : null;
+    if (r) deal = r.deal;
+    renders.push(r);
   }
   const title = o.showTitle && o.title.trim() ? o.title : null;
   const titleInk = title
@@ -195,7 +207,7 @@ export async function documentPages(
     const draw = drawPenOf(o.drawPen, a.pen);
     const pen = penFor(getHandwriting().style, fontSize, draw);
     if (drawings?.minPen) pen.width = Math.max(pen.width, drawings.minPen);
-    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, pen));
+    const d = await drawSketch(sketchLayout(String(a.code ?? ''), width, fontSize, pen), sketchDeals.get(a) ?? {});
     return `<svg x="${x}" y="${y}" width="${d.width * zoom}" height="${d.height * zoom}" viewBox="0 0 ${d.width} ${d.height}" overflow="visible">${drawingBody(d, o.ink, draw)}</svg>`;
   };
   /** A drawing among the lines at y: by the squares, within the room it was given. */

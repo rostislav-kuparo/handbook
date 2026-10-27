@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BlockFrame } from '../blocks/BlockFrame';
-import { engine, ParagraphRender } from '../engine/client';
+import { engine, type Deal, type ParagraphRender } from '../engine/client';
 import { FALLBACK_FONTS, HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
-import { heightOf } from '../sketch/render';
+import type { SketchLayout } from '../sketch/layout';
+import { dealAfter, heightOf, penFor, sketchLayout } from '../sketch/render';
 import { DrawPenContext, SketchFigure } from '../sketch/SketchFigure';
 import { docSeed, INK_VIEWBOX_TOP, InkPalette, LINE_HEIGHT_EM, LINE_HEIGHT_UNITS, paragraphRuns, topLevelNodes, wordsSeen } from './layout';
 import { flowPages, placeFloats } from './inkPages';
-import { SHEET_GAP, SHEET_H, SHEET_W, type DrawPen, type Geometry, type PaperStyle } from './page';
+import { drawPenOf, SHEET_GAP, SHEET_H, SHEET_W, type DrawPen, type Geometry, type PaperStyle } from './page';
 import { numberOf, PageContext, paperVars, Sheet } from './Paper';
 
 interface Props {
@@ -34,16 +35,105 @@ function inkProps(color: number, palette: string[]) {
     : { className: 'ink-colored', style: { ['--c' as string]: palette[color] ?? palette[0] } };
 }
 
+type Runs = ({ text: string; scales: number[]; colors: number[]; shifts: number[] } | null)[];
+
+/**
+ * A render of a document. Kept while the program runs, so going to «Почерк»
+ * and back (or to editing and back without changes) shows the same sheets at
+ * once, and a render left unfinished goes on in the background.
+ */
+interface InkJob {
+  /** What it is written from: the document, its paragraphs, size, width and line knobs. */
+  key: string;
+  /** The handwriting it is written in (font build counter). */
+  hand: number;
+  /** Every paragraph's ink once done; null while writing. */
+  renders: (ParagraphRender | null)[] | null;
+  /** Per drawing (by node), the letter variants used last before it: its labels go on from there. */
+  deals: (Deal | null)[];
+  progress: number;
+  cancelled: boolean;
+  listeners: Set<() => void>;
+}
+
+/** The latest render per document, the most recently used last (a few documents are kept). */
+const jobs = new Map<string, InkJob>();
+const KEPT_RENDERS = 6;
+/** Where the reader was in each rendered document, and how tall its HTML blocks turned out. */
+const places = new Map<string, { scrollTop: number; blockHeights: Record<number, number> }>();
+
+function keep(docId: string, job: InkJob) {
+  jobs.delete(docId);
+  jobs.set(docId, job);
+  for (const id of jobs.keys()) {
+    if (jobs.size <= KEPT_RENDERS) break;
+    jobs.delete(id);
+  }
+}
+
+/**
+ * Writes a document paragraph by paragraph, in reading order: each goes on with
+ * the variants the text before left unused — the labels of drawings and
+ * formulas (`drawings`, by node) in between too — and between paragraphs the
+ * worker can answer the studio.
+ */
+function startJob(
+  docId: string,
+  key: string,
+  hand: number,
+  runs: Runs,
+  seen: Record<string, number>[],
+  drawings: (SketchLayout | null)[],
+  unitsWidth: number,
+): InkJob {
+  const old = jobs.get(docId);
+  if (old && !old.renders) old.cancelled = true;
+  const job: InkJob = { key, hand, renders: null, deals: [], progress: 0, cancelled: false, listeners: new Set() };
+  keep(docId, job);
+  const notify = () => job.listeners.forEach((l) => l());
+  const total = Math.max(1, runs.reduce((a, r) => a + (r ? r.text.length + 1 : 0), 0));
+  const out: (ParagraphRender | null)[] = [];
+  void (async () => {
+    let done = 0;
+    let deal: Deal | undefined;
+    for (const [i, r] of runs.entries()) {
+      if (job.cancelled) return;
+      const drawing = drawings[i];
+      if (drawing) {
+        job.deals[i] = deal ?? {};
+        deal = await dealAfter(drawing, deal ?? {});
+      }
+      const res = r
+        ? await engine.renderParagraph(r.text, unitsWidth, LINE_HEIGHT_UNITS, docSeed(docId), {
+            scales: r.scales,
+            colors: r.colors,
+            shifts: r.shifts,
+            seen: seen[i],
+            deal,
+          })
+        : null;
+      if (res) deal = res.deal;
+      out.push(res);
+      done += r ? r.text.length + 1 : 0;
+      job.progress = done / total;
+      notify();
+    }
+  })()
+    .catch((err) => console.error(err))
+    .finally(() => {
+      if (job.cancelled) return;
+      job.renders = runs.map((_, i) => out[i] ?? null);
+      notify();
+    });
+  return job;
+}
+
 /**
  * "Ink" mode: every letter is a unique synthesized instance (not a font glyph)
  * and lines are uneven like on real paper. Lines and blocks flow onto A4
  * sheets; this is also what gets printed (one sheet per PDF page).
  */
 export function InkView({ docId, title, firstNumber, drawPen, content, fontSize, geo, paper, ink, onRendered }: Props) {
-  const [renders, setRenders] = useState<(ParagraphRender | null)[]>([]);
-  const [progress, setProgress] = useState(0);
-  const [busy, setBusy] = useState(true);
-  const [blockHeights, setBlockHeights] = useState<Record<number, number>>({});
   const { fontVersion, style } = useHandwriting();
   const nodes = useMemo(() => topLevelNodes(content), [content]);
   const onRenderedRef = useRef(onRendered);
@@ -57,36 +147,77 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
     const runs = nodes.map((n) => (n.type === 'paragraph' ? paragraphRuns(n, pal) : null));
     return { runs, seen: wordsSeen(runs.map((r) => r?.text ?? null)), palette: pal.colors };
   }, [nodes, ink]);
+  // Drawings and formulas, whose labels are written in the same run as the text.
+  const codes = useMemo(() => nodes.map((n) => (n.attrs?.kind === 'sketch' ? String(n.attrs.code ?? '') : null)), [nodes]);
+  const key = useMemo(
+    () => JSON.stringify([docId, runs, codes, fontSize, geo.contentW, style.sag, style.lineJitter]),
+    [docId, runs, codes, fontSize, geo.contentW, style.sag, style.lineJitter],
+  );
+
+  // A render kept from before (the same text and page) is shown at once — also in an older
+  // handwriting: then the reader is told and decides when to write it anew.
+  const kept = jobs.get(docId);
+  const [renders, setRenders] = useState<(ParagraphRender | null)[]>(() => (kept?.key === key && kept.renders) || []);
+  const [deals, setDeals] = useState<(Deal | null)[]>(() => (kept?.key === key && kept.renders && kept.deals) || []);
+  const [progress, setProgress] = useState(0);
+  const [busy, setBusy] = useState(!(kept?.key === key && kept.renders));
+  const [stale, setStale] = useState(false);
+  const [blockHeights, setBlockHeights] = useState<Record<number, number>>(() => (kept?.key === key && places.get(docId)?.blockHeights) || {});
+  /** The handwriting an older render may stay in: the one there was when the view opened, until «Перерисовать». */
+  const acceptHand = useRef(fontVersion);
+  const [redo, setRedo] = useState(0);
+  const stackRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    let alive = true;
-    setBusy(true);
-    setProgress(0);
     const unitsWidth = (geo.contentW / fontSize) * 1000;
-    const total = Math.max(1, runs.reduce((a, r) => a + (r ? r.text.length + 1 : 0), 0));
-    let done = 0;
-    Promise.all(
-      runs.map((r, i) =>
-        r
-          ? engine
-              .renderParagraph(r.text, unitsWidth, LINE_HEIGHT_UNITS, docSeed(docId), { scales: r.scales, colors: r.colors, shifts: r.shifts, seen: seen[i] })
-              .then((out) => {
-                done += r.text.length + 1;
-                if (alive) setProgress(done / total);
-                return out;
-              })
-          : Promise.resolve(null),
-      ),
-    ).then((out) => {
-      if (!alive) return;
-      setRenders(out);
+    let job = jobs.get(docId);
+    const reuse = job && job.key === key && (job.hand === fontVersion || (fontVersion === acceptHand.current && job.renders !== null));
+    if (!job || !reuse) {
+      const drawings = nodes.map((n, i) =>
+        codes[i] === null ? null : sketchLayout(codes[i], geo.contentW, fontSize, penFor(style, fontSize, drawPenOf(drawPen, n.attrs?.pen))),
+      );
+      job = startJob(docId, key, fontVersion, runs, seen, drawings, unitsWidth);
+    }
+    else keep(docId, job);
+    const current = job;
+    let done = false;
+    const update = () => {
+      setProgress(current.progress);
+      if (!current.renders || done) return;
+      done = true;
+      setRenders(current.renders);
+      setDeals(current.deals);
       setBusy(false);
+      setStale(current.hand !== fontVersion);
       requestAnimationFrame(() => onRenderedRef.current?.());
-    });
-    return () => {
-      alive = false;
     };
-  }, [runs, seen, fontSize, fontVersion, docId, style.sag, style.lineJitter, geo.contentW]);
+    setBusy(!current.renders);
+    current.listeners.add(update);
+    update();
+    return () => {
+      current.listeners.delete(update);
+    };
+  }, [key, fontVersion, redo]);
+
+  // Back where the reader left the document after going to «Почерк» (the page opens at its top
+  // then; switching from editing keeps the place the editor was at). Remembered when the view closes.
+  useLayoutEffect(() => {
+    const scroller = stackRef.current?.closest('.doc-main');
+    const at = places.get(docId)?.scrollTop;
+    if (scroller && at !== undefined && scroller.scrollTop === 0 && renders.length > 0) scroller.scrollTop = at;
+    return () => {
+      places.set(docId, { scrollTop: scroller?.scrollTop ?? 0, blockHeights: places.get(docId)?.blockHeights ?? {} });
+    };
+  }, [docId]);
+  useEffect(() => {
+    places.set(docId, { scrollTop: places.get(docId)?.scrollTop ?? 0, blockHeights });
+  }, [docId, blockHeights]);
+
+  const rewrite = () => {
+    acceptHand.current = -1;
+    setStale(false);
+    setRedo((n) => n + 1);
+  };
 
   // Flow lines and blocks onto sheets (the PNG/SVG export uses the same layout).
   // A drawing knows its height before it is drawn; an HTML block reports it once loaded.
@@ -109,7 +240,15 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
   return (
     <PageContext.Provider value={geo}>
       <DrawPenContext.Provider value={drawPen}>
-      <div className="ink-stack" style={{ ...paperVars(fontSize, ink), width: SHEET_W }}>
+      <div ref={stackRef} className="ink-stack" style={{ ...paperVars(fontSize, ink), width: SHEET_W }}>
+        {stale && !busy && (
+          <div className="ink-progress ink-stale no-print" role="status">
+            <span>Почерк изменился после этого рендера.</span>
+            <button className="btn primary" onClick={rewrite}>
+              Перерисовать
+            </button>
+          </div>
+        )}
         {busy && (
           <div className="ink-progress no-print" role="progressbar" aria-valuenow={Math.round(progress * 100)}>
             <span>Пишу от руки… {Math.round(progress * 100)}%</span>
@@ -140,7 +279,7 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
                   if (a.kind === 'sketch') {
                     return (
                       <div key={`b${it.node}`} className="ink-block" style={{ top: it.y }}>
-                        <SketchFigure code={String(a.code ?? '')} pen={a.pen} width={geo.contentW} fontSize={fontSize} />
+                        <SketchFigure code={String(a.code ?? '')} pen={a.pen} width={geo.contentW} fontSize={fontSize} deal={deals[it.node] ?? null} />
                       </div>
                     );
                   }
@@ -192,7 +331,7 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
               .map((f) => (
                 <div key={`f${f.i}`} className="ink-float" style={{ top: f.top, left: f.left, width: f.width }}>
                   {f.attrs.kind === 'sketch' ? (
-                    <SketchFigure code={String(f.attrs.code ?? '')} pen={f.attrs.pen} width={f.width} fontSize={fontSize} />
+                    <SketchFigure code={String(f.attrs.code ?? '')} pen={f.attrs.pen} width={f.width} fontSize={fontSize} deal={deals[f.i] ?? null} />
                   ) : (
                     <BlockFrame code={String(f.attrs.code ?? '')} data={f.attrs.data} title={String(f.attrs.title ?? 'Блок')} />
                   )}

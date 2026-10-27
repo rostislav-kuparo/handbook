@@ -33,6 +33,7 @@ const SYMBOLS: Record<string, string> = {
   to: '→', rightarrow: '→', longrightarrow: '→', leftarrow: '←', gets: '←', longleftarrow: '←',
   leftrightarrow: '↔', Rightarrow: '⇒', Longrightarrow: '⇒', implies: '⇒', Leftarrow: '⇐',
   Leftrightarrow: '⇔', iff: '⇔', mapsto: '↦', uparrow: '↑', downarrow: '↓',
+  longleftrightarrow: '↔', Longleftarrow: '⇐', Longleftrightarrow: '⇔',
   // geometry and the rest
   angle: '∠', measuredangle: '∡', triangle: '△', square: '□', degree: '°', prime: '′',
   infty: '∞', partial: '∂', nabla: '∇', sum: '∑', prod: '∏', int: '∫', oint: '∮',
@@ -64,6 +65,11 @@ const MATH_ARG = new Set([
 ]);
 const BLACKBOARD: Record<string, string> = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ' };
 const NEGATED: Record<string, string> = { '=': '≠', in: '∉', subset: '⊄', equiv: '≢', parallel: '∦' };
+
+/** Every sign a LaTeX formula can turn into: the handwriting studio offers them for writing. */
+export const TEX_CHARS = [...new Set([...Object.values(SYMBOLS), ...Object.values(BLACKBOARD), ...Object.values(NEGATED)])].filter(
+  (c) => [...c].length === 1 && c.trim() !== '',
+);
 
 class TexReader {
   i = 0;
@@ -167,6 +173,19 @@ class TexReader {
           put(this.arg());
         } else if (MATH_ARG.has(name)) {
           putRuns(convertTex(this.arg(), script));
+        } else if (/^x(?:left|right|leftright|Left|Right|Leftright)arrow$/.test(name)) {
+          // \xrightarrow[below]{above} on one line: the arrow, then its labels as indices.
+          const below = this.option();
+          const above = this.arg();
+          put(SYMBOLS[name.slice(1)]);
+          for (const [mark, kind] of [[above, 'sup'], [below ?? '', 'sub']] as [string, ScriptKind][]) {
+            if (mark.trim()) putRuns(convertTex(mark, script ?? kind).map((r) => ({ ...r, script: script ?? kind })));
+          }
+        } else if (name === 'overset' || name === 'stackrel' || name === 'underset') {
+          const mark = this.arg();
+          putRuns(convertTex(this.arg(), script));
+          const kind: ScriptKind = name === 'underset' ? 'sub' : 'sup';
+          putRuns(convertTex(mark, script ?? kind).map((r) => ({ ...r, script: script ?? kind })));
         } else if (name === 'not') {
           const next = this.arg().replace(/^\\/, '');
           put(NEGATED[next] ?? SYMBOLS[next] ?? next);
@@ -275,21 +294,27 @@ export function convertMathInText(text: string): MathRun[] | null {
 }
 
 /**
- * Text cut around its formulas with tables: the text between (its other
- * formulas still in it) and the tables' formulas; null when it has none.
+ * Text cut around its formulas with tables: the stretches between (from–to,
+ * spaces at their ends left out; their other formulas still in them) and the
+ * tables' formulas; null when it has none.
  */
-export function splitTables(text: string): ({ text: string } | { tex: string })[] | null {
-  const out: ({ text: string } | { tex: string })[] = [];
+export function splitTables(text: string): ({ from: number; to: number } | { tex: string })[] | null {
+  const out: ({ from: number; to: number } | { tex: string })[] = [];
+  const stretch = (from: number, to: number) => {
+    while (from < to && /\s/.test(text[from])) from++;
+    while (to > from && /\s/.test(text[to - 1])) to--;
+    if (to > from) out.push({ from, to });
+  };
   let last = 0;
   for (const m of text.matchAll(MATH_IN_TEXT)) {
     const tex = texOf(m);
     if (!hasTable(tex)) continue;
-    if (m.index! > last) out.push({ text: text.slice(last, m.index) });
+    stretch(last, m.index!);
     out.push({ tex: tex.trim() });
     last = m.index! + m[0].length;
   }
-  if (!out.length) return null;
-  if (last < text.length) out.push({ text: text.slice(last) });
+  if (last === 0) return null;
+  stretch(last, text.length);
   return out;
 }
 
@@ -297,5 +322,5 @@ export function countMathInText(text: string): number {
   return [...text.matchAll(MATH_IN_TEXT)].length;
 }
 
-/** A $…$ (or '''…''') formula just closed by typing the second $ (for the input rule). */
-export const TYPED_MATH = /(?:^|\s)(\$(?!\s)[^$\n]*?[^$\s\\]\$|['’]{3}[^\n]+?['’]{3})$/;
+/** A $…$ (or '''…''') formula just closed by typing its last character (for the input rule). */
+export const TYPED_MATH = /(?:^|\s)(\$(?!\s)[^$\n]*?[^$\s\\]\$)$|(['’]{3}(?:(?!['’]{3})[^\n])+?['’]{3})$/;

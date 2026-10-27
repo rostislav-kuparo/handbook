@@ -2,22 +2,22 @@ import type { Editor } from '@tiptap/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TEMPLATES } from '../blocks/templates';
 import { DeskDialog } from '../desk/DeskDialog';
-import { exportDesks, importDesks } from '../desk/desks';
-import { SketchHelp } from '../sketch/SketchHelp';
+import { TopCorner } from '../ExportsButton';
 import { HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
 import type { DocContent, HandDocument } from '../model/types';
-import { createDocument, db, exportEverything, getSetting, importEverything, importHandwriting, setSetting } from '../storage/db';
-import { saveFile } from '../util/download';
+import { createDocument, db, getSetting, setSetting } from '../storage/db';
+import { BlockIcon, ExportIcon, NibIcon, PencilIcon } from '../ui/icons';
 import { useLive } from '../util/useLive';
+import { docState, PRINT_EVENT, SHOW_DOC_EVENT } from './docState';
 import { exportDocumentJson, exportFont, exportPng, exportSvg } from './exporters';
 import { HandEditor } from './HandEditor';
 import { InkView } from './InkView';
 import { geometry, pageSetup, sheetNumber, type PageSetup } from './page';
 import { PageMenu } from './PageMenu';
 import { RenderMenu } from './RenderMenu';
+import { SketchMenu } from './SketchMenu';
 import { SymbolsMenu } from './SymbolsMenu';
-import { countSketchFences } from './sketchFences';
 import { Paper } from './Paper';
 import { welcomeContent } from './welcome';
 
@@ -40,18 +40,17 @@ function openInitialDocument(): Promise<string | null> {
 
 export function Documents() {
   const docs = useLive(() => db.documents.orderBy('updatedAt').reverse().toArray(), [], null as HandDocument[] | null);
-  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [currentId, setCurrentId] = useState<string | null>(docState.docId);
   const [fontSize, setFontSize] = useState(26);
-  const [ink, setInk] = useState(false);
+  const [ink, setInk] = useState(docState.ink);
   const [pages, setPages] = useState(1);
   const [printPending, setPrintPending] = useState(false);
+  /** The window menu asked to print (maybe from the other tab): done once the document is here. */
+  const [printAsked, setPrintAsked] = useState(docState.print);
   const [editor, setEditor] = useState<Editor | null>(null);
-  const [sketchHelp, setSketchHelp] = useState(false);
   const [desk, setDesk] = useState(false);
-  /** The full backup also carries «Мои столы» (their photos make it large). */
-  const [backupDesks, setBackupDesks] = useState(false);
-  /** Drawings still sitting in the text as ```…```, counted when the insert menu opens. */
-  const [fences, setFences] = useState(0);
+  /** The document whose name is being edited in «Недавние». */
+  const [renaming, setRenaming] = useState<string | null>(null);
   // Content of the open document, tagged with its id so a stale one is never shown.
   const [loaded, setLoaded] = useState<{ id: string; content: DocContent } | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -64,10 +63,31 @@ export function Documents() {
   useEffect(() => {
     void (async () => {
       setFontSize(await getSetting('editor.fontSize', 26));
+      if (docState.docId) return;
       const id = await openInitialDocument();
       if (id) setCurrentId(id);
     })();
   }, []);
+
+  // The window menu: a new or opened document, printing.
+  useEffect(() => {
+    const onShow = (e: Event) => {
+      setCurrentId((e as CustomEvent<string>).detail);
+      setInk(false);
+    };
+    const onPrint = () => setPrintAsked(true);
+    window.addEventListener(SHOW_DOC_EVENT, onShow);
+    window.addEventListener(PRINT_EVENT, onPrint);
+    return () => {
+      window.removeEventListener(SHOW_DOC_EVENT, onShow);
+      window.removeEventListener(PRINT_EVENT, onPrint);
+    };
+  }, []);
+
+  useEffect(() => {
+    docState.docId = currentId;
+    docState.ink = ink;
+  }, [currentId, ink]);
 
   useEffect(() => {
     if (!currentId && docs && docs.length > 0) setCurrentId(docs[0].id);
@@ -105,43 +125,6 @@ export function Documents() {
     },
     [currentId],
   );
-
-  const newDoc = async () => {
-    const d = await createDocument();
-    setCurrentId(d.id);
-    setInk(false);
-  };
-
-  const openRef = useRef<HTMLInputElement>(null);
-  /** Opens a document, or loads a full backup / handwriting file (any Handbook .json). */
-  const openDoc = async (file: File) => {
-    try {
-      const data = JSON.parse(await file.text());
-      if (data?.format === 'handbook-backup') {
-        const n = await importEverything(data);
-        const desks = Array.isArray(data.desks) ? await importDesks(data.desks) : 0;
-        alert(`Загружено из резервной копии: документов — ${n.documents}, вариантов букв — ${n.samples}${desks ? `, столов — ${desks}` : ''}.`);
-        return;
-      }
-      if (data?.format === 'handbook-handwriting') {
-        await importHandwriting(data, false);
-        alert(`Почерк добавлен: вариантов букв — ${data.samples.length}.`);
-        return;
-      }
-      if (data?.format !== 'handbook-document' || !data.content) throw new Error('Это не файл Handbook (.json)');
-      const d = await createDocument(String(data.title ?? 'Без названия'), data.content);
-      setCurrentId(d.id);
-      setInk(false);
-    } catch (err) {
-      alert(String(err));
-    }
-  };
-
-  const saveEverything = async () => {
-    const data = await exportEverything(backupDesks ? await exportDesks() : undefined);
-    const day = new Date().toISOString().slice(0, 10);
-    await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), `handbook-backup-${day}.json`);
-  };
 
   const removeDoc = async (d: HandDocument) => {
     if (!confirm(`Удалить «${d.title}»? Это нельзя отменить.`)) return;
@@ -182,217 +165,194 @@ export function Documents() {
     setPrintPending(true);
   };
 
+  useEffect(() => {
+    if (!printAsked || !doc || !content) return;
+    setPrintAsked(false);
+    docState.print = false;
+    print();
+  }, [printAsked, doc, content]);
+
   if (!docs) return <div className="loading">Открываю тетрадь…</div>;
 
   return (
     <div className="documents">
-      <aside className="doc-list">
-        <button className="btn primary wide" onClick={newDoc}>
-          + Новый документ
-        </button>
-        <button className="btn wide open-doc" onClick={() => openRef.current?.click()} title="Документ, почерк или резервную копию">
-          Открыть .json…
-        </button>
-        <button className="btn wide open-doc" onClick={() => void saveEverything()} title="Почерк, все документы и настройки — одним файлом">
-          Резервная копия всего
-        </button>
-        <label className="check backup-desks" title="Фото столов для экспорта «На столе (фото)»: файл станет больше на 1–3 МБ за стол">
-          <input type="checkbox" checked={backupDesks} onChange={(e) => setBackupDesks(e.target.checked)} />
-          со столами (фото)
-        </label>
-        <input
-          ref={openRef}
-          type="file"
-          accept=".json,application/json"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void openDoc(f);
-            e.target.value = '';
-          }}
-        />
-        <ul>
+      <aside className="recents float no-print">
+        <h4 className="recents-head">Недавние</h4>
+        <ul className="fade-scroll">
           {docs.map((d) => (
             <li key={d.id} className={d.id === currentId ? 'active' : ''}>
-              <button className="doc-link" onClick={() => setCurrentId(d.id)}>
-                <span className="doc-title" style={{ fontFamily: HAND_FONT_STACK }}>
-                  {d.title || 'Без названия'}
-                </span>
-                <span className="muted small">{new Date(d.updatedAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}</span>
+              {renaming === d.id ? (
+                <div className="doc-link">
+                  <input
+                    className="doc-rename"
+                    autoFocus
+                    defaultValue={d.title}
+                    placeholder="Без названия"
+                    aria-label="Новое название"
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') e.currentTarget.blur();
+                      else if (e.key === 'Escape') {
+                        e.currentTarget.value = d.title;
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const title = e.currentTarget.value.trim();
+                      if (title !== d.title) void db.documents.update(d.id, { title, updatedAt: Date.now() });
+                      setRenaming(null);
+                    }}
+                  />
+                </div>
+              ) : (
+                <button className="doc-link" onClick={() => setCurrentId(d.id)} onDoubleClick={() => setRenaming(d.id)}>
+                  <span className="doc-title">{d.title || 'Без названия'}</span>
+                  <span className="muted small">{new Date(d.updatedAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}</span>
+                </button>
+              )}
+              <button className="doc-action" onClick={() => setRenaming(d.id)} aria-label="Переименовать документ" title="Переименовать">
+                ✎
               </button>
-              <button className="doc-delete" onClick={() => void removeDoc(d)} aria-label="Удалить документ" title="Удалить">
+              <button className="doc-action doc-delete" onClick={() => void removeDoc(d)} aria-label="Удалить документ" title="Удалить">
                 ✕
               </button>
             </li>
           ))}
         </ul>
-        {samples.length === 0 && (
-          <p className="hint-card">
-            Почерк ещё пуст — текст показан системным рукописным шрифтом. Откройте вкладку «Почерк», чтобы написать буквы.
-          </p>
-        )}
+        {samples.length === 0 && <p className="recents-note muted small">Почерк пуст — напишите буквы во вкладке «Почерк».</p>}
       </aside>
 
       <main className="doc-main" ref={pageRef}>
-        {doc && content && (
-          <>
-            <div className="toolbar no-print">
-              <details
-                className="menu"
-                onToggle={(e) => {
-                  if ((e.currentTarget as HTMLDetailsElement).open && editor) setFences(countSketchFences(editor.state.doc));
-                }}
-              >
-                <summary className="btn">Вставить блок ▾</summary>
-                <div className="menu-items">
+        {doc &&
+          content &&
+          (ink ? (
+            <InkView
+              docId={doc.id}
+              title={setup.showTitle ? doc.title : null}
+              firstNumber={firstNumber}
+              drawPen={setup.drawPen}
+              content={content}
+              fontSize={fontSize}
+              geo={geo}
+              paper={setup.paper}
+              ink={setup.ink}
+              onRendered={() => {
+                inkReady.current = true;
+                if (printPending) {
+                  setPrintPending(false);
+                  setTimeout(() => window.print(), 400);
+                }
+              }}
+            />
+          ) : (
+            <Paper
+              pages={pages}
+              firstNumber={firstNumber}
+              drawPen={setup.drawPen}
+              fontSize={fontSize}
+              geo={geo}
+              paper={setup.paper}
+              ink={setup.ink}
+              onBlankClick={() => editor?.commands.focus('end')}
+            >
+              {setup.showTitle && (
+                <input
+                  className="page-title"
+                  value={doc.title}
+                  placeholder="Название"
+                  onChange={(e) => void db.documents.update(doc.id, { title: e.target.value, updatedAt: Date.now() })}
+                  style={{ fontFamily: HAND_FONT_STACK }}
+                  aria-label="Название документа"
+                />
+              )}
+              <HandEditor
+                key={doc.id}
+                doc={{ ...doc, content }}
+                fontSize={fontSize}
+                geo={geo}
+                onChange={onChange}
+                onEditor={setEditor}
+                onPages={setPages}
+              />
+            </Paper>
+          ))}
+      </main>
+
+      {doc && content && (
+        <>
+          <TopCorner>
+            <details className="menu right">
+              <summary className="corner-btn float" title="Экспорт" aria-label="Экспорт">
+                <ExportIcon />
+              </summary>
+              <div className="menu-items">
+                <button onClick={(e) => (closeMenus(e.currentTarget), print())}>
+                  <strong>Печать / PDF</strong>
+                  <span className="muted small">вместе с блоками</span>
+                </button>
+                <button onClick={(e) => (closeMenus(e.currentTarget), void exportPng(pageExport()))}>
+                  <strong>Картинка PNG</strong>
+                </button>
+                <button onClick={(e) => (closeMenus(e.currentTarget), void exportSvg(pageExport()))}>
+                  <strong>Вектор SVG</strong>
+                </button>
+                <button onClick={(e) => (closeMenus(e.currentTarget), setDesk(true))}>
+                  <strong>На столе (фото)…</strong>
+                  <span className="muted small">текст на снимке настоящего листа, JPG</span>
+                </button>
+                <button disabled={!fontBytes} onClick={(e) => (closeMenus(e.currentTarget), void exportFont())}>
+                  <strong>Мой шрифт .ttf</strong>
+                  <span className="muted small">для Word, Figma и т. п.</span>
+                </button>
+                <button onClick={(e) => (closeMenus(e.currentTarget), void exportDocumentJson(doc.title, content))}>
+                  <strong>Документ .json</strong>
+                </button>
+              </div>
+            </details>
+          </TopCorner>
+
+          <div className="tool-rail float no-print" role="toolbar" aria-orientation="vertical" aria-label="Инструменты">
+            <details className="menu">
+              <summary className="rail-btn" title="Вставить блок" aria-label="Вставить блок">
+                <BlockIcon />
+              </summary>
+              <div className="menu-items">
+                {TEMPLATES.map((t) => (
                   <button
+                    key={t.id}
                     disabled={ink || !editor}
                     onClick={(e) => {
                       closeMenus(e.currentTarget);
-                      editor?.chain().focus().insertHtmlBlock({ kind: 'sketch', title: 'Чертёж', code: '' }).run();
+                      editor
+                        ?.chain()
+                        .focus()
+                        .insertHtmlBlock({ title: t.title, code: t.code, data: structuredClone(t.data) })
+                        .run();
                     }}
                   >
-                    <strong>Чертёж</strong>
-                    <span className="muted small">график или геометрия командами GeoGebra — рисуется вашим почерком</span>
+                    <strong>{t.name}</strong>
+                    <span className="muted small">{t.description}</span>
                   </button>
-                  <button
-                    onClick={(e) => {
-                      closeMenus(e.currentTarget);
-                      setSketchHelp(true);
-                    }}
-                  >
-                    <strong>Команды чертежа и запрос для нейронки</strong>
-                    <span className="muted small">справка с примерами</span>
-                  </button>
-                  <button
-                    disabled={ink || !editor || fences === 0}
-                    onClick={(e) => {
-                      closeMenus(e.currentTarget);
-                      editor?.chain().focus().convertSketchFences().run();
-                    }}
-                  >
-                    <strong>Найти чертежи в тексте{fences > 0 ? ` (${fences})` : ''}</strong>
-                    <span className="muted small">команды между строками ``` или ёёё станут чертежами</span>
-                  </button>
-                  <hr className="menu-sep" />
-                  {TEMPLATES.map((t) => (
-                    <button
-                      key={t.id}
-                      disabled={ink || !editor}
-                      onClick={(e) => {
-                        closeMenus(e.currentTarget);
-                        editor
-                          ?.chain()
-                          .focus()
-                          .insertHtmlBlock({ title: t.title, code: t.code, data: structuredClone(t.data) })
-                          .run();
-                      }}
-                    >
-                      <strong>{t.name}</strong>
-                      <span className="muted small">{t.description}</span>
-                    </button>
-                  ))}
-                </div>
-              </details>
-
-              <PageMenu setup={setup} onChange={updatePage} fontSize={fontSize} onFontSize={changeFontSize} />
-
-              <SymbolsMenu editor={editor} disabled={ink || !editor} />
-
-              <div className="btn-group push-right">
-                <button
-                  className={`btn ${ink ? 'on' : ''}`}
-                  onClick={() => setInk(!ink)}
-                  title="Нарисовать текст ручкой: каждая буква уникальна, строки неровные, как на бумаге"
-                >
-                  {ink ? '✎ Редактировать' : '✒ Отрендерить'}
-                </button>
-                <RenderMenu />
+                ))}
               </div>
-
-              <details className="menu right">
-                <summary className="btn">Экспорт ▾</summary>
-                <div className="menu-items">
-                  <button onClick={(e) => (closeMenus(e.currentTarget), print())}>
-                    <strong>Печать / PDF</strong>
-                    <span className="muted small">вместе с блоками</span>
-                  </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportPng(pageExport()))}>
-                    <strong>Картинка PNG</strong>
-                  </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportSvg(pageExport()))}>
-                    <strong>Вектор SVG</strong>
-                  </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), setDesk(true))}>
-                    <strong>На столе (фото)…</strong>
-                    <span className="muted small">текст на снимке настоящего листа, JPG</span>
-                  </button>
-                  <button disabled={!fontBytes} onClick={(e) => (closeMenus(e.currentTarget), void exportFont())}>
-                    <strong>Мой шрифт .ttf</strong>
-                    <span className="muted small">для Word, Figma и т. п.</span>
-                  </button>
-                  <button onClick={(e) => (closeMenus(e.currentTarget), void exportDocumentJson(doc.title, content))}>
-                    <strong>Документ .json</strong>
-                  </button>
-                </div>
-              </details>
-            </div>
-
-            {ink ? (
-              <InkView
-                docId={doc.id}
-                title={setup.showTitle ? doc.title : null}
-                firstNumber={firstNumber}
-                drawPen={setup.drawPen}
-                content={content}
-                fontSize={fontSize}
-                geo={geo}
-                paper={setup.paper}
-                ink={setup.ink}
-                onRendered={() => {
-                  inkReady.current = true;
-                  if (printPending) {
-                    setPrintPending(false);
-                    setTimeout(() => window.print(), 400);
-                  }
-                }}
-              />
-            ) : (
-              <Paper
-                pages={pages}
-                firstNumber={firstNumber}
-                drawPen={setup.drawPen}
-                fontSize={fontSize}
-                geo={geo}
-                paper={setup.paper}
-                ink={setup.ink}
-                onBlankClick={() => editor?.commands.focus('end')}
-              >
-                {setup.showTitle && (
-                  <input
-                    className="page-title"
-                    value={doc.title}
-                    placeholder="Название"
-                    onChange={(e) => void db.documents.update(doc.id, { title: e.target.value, updatedAt: Date.now() })}
-                    style={{ fontFamily: HAND_FONT_STACK }}
-                    aria-label="Название документа"
-                  />
-                )}
-                <HandEditor
-                  key={doc.id}
-                  doc={{ ...doc, content }}
-                  fontSize={fontSize}
-                  geo={geo}
-                  onChange={onChange}
-                  onEditor={setEditor}
-                  onPages={setPages}
-                />
-              </Paper>
-            )}
-          </>
-        )}
-      </main>
-      {sketchHelp && <SketchHelp onClose={() => setSketchHelp(false)} />}
+            </details>
+            <PageMenu setup={setup} onChange={updatePage} fontSize={fontSize} onFontSize={changeFontSize} />
+            <SymbolsMenu editor={editor} disabled={ink || !editor} />
+            <SketchMenu editor={editor} ink={ink} setup={setup} onChange={updatePage} />
+            <span className="rail-sep" />
+            <button
+              className={`rail-btn ${ink ? 'on' : ''}`}
+              onClick={() => setInk(!ink)}
+              title={ink ? 'Редактировать' : 'Отрендерить: каждая буква уникальна, строки неровные, как на бумаге'}
+              aria-label={ink ? 'Редактировать' : 'Отрендерить'}
+              aria-pressed={ink}
+            >
+              {ink ? <PencilIcon /> : <NibIcon />}
+            </button>
+            <RenderMenu />
+          </div>
+        </>
+      )}
       {desk && doc && content && <DeskDialog base={pageExport()} setup={setup} onClose={() => setDesk(false)} />}
     </div>
   );

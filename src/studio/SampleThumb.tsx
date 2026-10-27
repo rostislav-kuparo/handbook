@@ -113,7 +113,7 @@ export function SampleThumb({ sample, weightKey, onDelete, onAnchor }: Props) {
   // Where this variant goes in a word (only letters join).
   const joinsIn = !!sample.entry?.connect && anchorOnEdge('entry', sample.entry, sample.strokes);
   const joinsOut = !!sample.exit?.connect && anchorOnEdge('exit', sample.exit, sample.strokes);
-  const place = !/^\p{L}/u.test(sample.char) ? null : !joinsIn ? 'начало слова' : joinsOut ? 'середина' : null;
+  const place = !/^\p{L}/u.test(sample.char) ? null : joinsIn ? (joinsOut ? 'середина' : 'конец слова') : joinsOut ? 'начало слова' : 'отдельно';
   const tooTall = looksTooTall(sample.char, Math.max(...sample.strokes.flat().map((p) => p.y)), X_HEIGHT);
 
   return (

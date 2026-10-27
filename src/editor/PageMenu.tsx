@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { DrawPenPicker } from '../sketch/DrawPenPicker';
+import { SheetIcon } from '../ui/icons';
 import { INK_COLORS, MARGIN_PRESETS, type PageSetup, type PaperStyle } from './page';
 
 /** A tiny sheet of paper (16×22) for the icons. */
@@ -59,12 +59,14 @@ interface Props {
   onFontSize: (px: number) => void;
 }
 
-/** Page setup of the open document: letter size, paper, margins, drawing pen, title, page numbers, pen colour. */
+/** Page setup of the open document: letter size, paper, margins, title, page numbers, pen colour. */
 export function PageMenu({ setup, onChange, fontSize, onFontSize }: Props) {
   const same = (m: PageSetup['margins']) => SIDES.every((s) => m[s.key] === setup.margins[s.key]);
   return (
     <details className="menu">
-      <summary className="btn">Лист ▾</summary>
+      <summary className="rail-btn" title="Лист" aria-label="Лист">
+        <SheetIcon />
+      </summary>
       <div className="menu-items page-menu">
         <label className="font-size-row" title="Размер почерка во всех документах">
           <span>
@@ -119,11 +121,6 @@ export function PageMenu({ setup, onChange, fontSize, onFontSize }: Props) {
               />
             </label>
           ))}
-        </div>
-
-        <div className="page-menu-drawings">
-          <span className="small">Чертежи</span>
-          <DrawPenPicker value={setup.drawPen} textInk={setup.ink} onChange={(drawPen) => onChange({ ...setup, drawPen })} />
         </div>
 
         <div className="page-menu-foot">

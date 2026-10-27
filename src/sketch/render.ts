@@ -1,11 +1,12 @@
 // A drawing from its text: the same picture in the editor, the rendered
 // view and the exported sheets.
 import type { DrawPen } from '../editor/page';
+import type { Deal } from '../engine/client';
 import { FALLBACK_FONTS } from '../engine/constants';
 import type { Style } from '../model/types';
 import { compileSketch } from './evaluate';
 import { formulaOf, layoutFormula } from './formula';
-import { labelInk } from './labels';
+import { labelInk, type LabelInk } from './labels';
 import { layoutSketch, placeLabels, sketchHeight, sketchScale, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
 import type { Pen } from './pen';
 
@@ -83,10 +84,34 @@ export function linesOnly(layout: SketchLayout): Drawing {
   return { width: layout.width, height: layout.height, paths: layout.paths, labels: [], empty: layout.empty };
 }
 
-/** The whole drawing, labels written by the handwriting engine. */
-export async function drawSketch(layout: SketchLayout): Promise<Drawing> {
-  const inks = await Promise.all(layout.labels.map((l) => labelInk(l.runs, l.seed)));
+/**
+ * A drawing's labels written one after another: each goes on with the
+ * variants the text and labels before it left unused (`deal`), so a letter
+ * repeated in and around a formula (M₄₁ … M₄₁ = |…|) is never the same twice
+ * running. Returns the labels and the deal the text after the drawing goes on with.
+ */
+async function writeLabels(layout: SketchLayout, deal: Deal): Promise<{ inks: LabelInk[]; deal: Deal }> {
+  const inks: LabelInk[] = [];
+  for (const l of layout.labels) {
+    const ink = await labelInk(l.runs, l.seed, deal);
+    deal = ink.deal;
+    inks.push(ink);
+  }
+  return { inks, deal };
+}
+
+/** The whole drawing, labels written by the handwriting engine, going on from `deal`. */
+export async function drawSketch(layout: SketchLayout, deal: Deal = {}): Promise<Drawing> {
+  const { inks } = await writeLabels(layout, deal);
   return { ...linesOnly(layout), labels: placeLabels(layout, inks) };
+}
+
+/**
+ * The deal after a drawing's labels, written from `deal` on — for the text
+ * after it. The labels stay cached, so drawing it from the same deal is instant.
+ */
+export async function dealAfter(layout: SketchLayout, deal: Deal): Promise<Deal> {
+  return (await writeLabels(layout, deal)).deal;
 }
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

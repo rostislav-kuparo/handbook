@@ -2,14 +2,9 @@ import { useEditorState, type Editor } from '@tiptap/react';
 import { useState } from 'react';
 import { HAND_FONT_STACK } from '../engine/constants';
 import { hasGlyph } from '../engine/handwriting';
+import { SYMBOL_GROUPS } from '../model/symbols';
+import { SigmaIcon } from '../ui/icons';
 import { countRawMath } from './mathText';
-
-const GROUPS: { name: string; chars: string }[] = [
-  { name: 'Греческие', chars: 'αβγδεθλμπρσφωΔΠΣΦΩ' },
-  { name: 'Действия', chars: '+−×·÷±=≠≈≡<>≤≥' },
-  { name: 'Геометрия', chars: '⊥∥∠△°′∈∉⊂∪∩∅' },
-  { name: 'Ещё', chars: '→⇒⇔∞√∑∫∀∃' },
-];
 
 /**
  * Formulas: indices (x₁, x²), Greek letters and math signs in the user's own
@@ -43,7 +38,9 @@ export function SymbolsMenu({ editor, disabled }: { editor: Editor | null; disab
         if ((e.currentTarget as HTMLDetailsElement).open && editor) setRaw(countRawMath(editor.state.doc));
       }}
     >
-      <summary className={`btn ${disabled ? 'disabled' : ''}`}>Σ Формулы ▾</summary>
+      <summary className="rail-btn" title="Формулы" aria-label="Формулы">
+        <SigmaIcon />
+      </summary>
       <div className="menu-items symbols-menu">
         <div className="symbols-row">
           <span className="symbols-label">Индекс</span>
@@ -64,7 +61,7 @@ export function SymbolsMenu({ editor, disabled }: { editor: Editor | null; disab
             x<sup>2</sup>
           </button>
         </div>
-        {GROUPS.map((g) => (
+        {SYMBOL_GROUPS.map((g) => (
           <div key={g.name} className="symbols-row">
             <span className="symbols-label">{g.name}</span>
             <div className="symbols-grid">
@@ -94,10 +91,6 @@ export function SymbolsMenu({ editor, disabled }: { editor: Editor | null; disab
           >
             Распознать формулы $…$ {raw > 0 ? `(${raw})` : ''}
           </button>
-          <p className="muted small">
-            Формулы из ChatGPT, Gemini, Википедии вставляются сразу рукописными: <code>$f_1$</code> → f₁. Можно и набрать:{' '}
-            <code>$\Pi_1$</code> — превратится в Π₁, как только закроете знаком $.
-          </p>
         </div>
       </div>
     </details>

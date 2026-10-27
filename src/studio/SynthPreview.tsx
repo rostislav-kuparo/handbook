@@ -17,7 +17,7 @@ export function SynthPreview({ char, count = 9 }: { char: string; count?: number
     };
   }, [char, count, seed, fontVersion]);
 
-  if (glyphs.length === 0) return <p className="muted">Напишите хотя бы один вариант — и движок начнёт варьировать букву.</p>;
+  if (glyphs.length === 0) return <p className="muted small">Появится после первого варианта.</p>;
 
   let x = 0;
   const placed = glyphs.map((g) => {

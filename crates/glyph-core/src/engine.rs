@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
+use crate::deal::Deal;
 use crate::derive::{self, Kind};
 use crate::font::{build_font, round_contours, FontGlyph, FontOptions, KeyGlyphs};
 use crate::geom::{strokes_bbox, BBox};
@@ -16,7 +17,7 @@ use crate::outline;
 use crate::rng::{hash_str, mix, Rng};
 use crate::shape_model::ShapeModel;
 use crate::geom::{Pt, Stroke};
-use crate::synth::{self, adapt_entry, stretch_entry, GlyphInk, Joins, Placement, Position, Prepared};
+use crate::synth::{self, adapt_entry, stretch_entry, Choice, GlyphInk, Joins, Placement, Position, Prepared};
 
 struct KeyData {
     signature: u64,
@@ -115,6 +116,9 @@ pub struct CharStyles {
     /// Also return the strokes' centre lines with pressure (`lineSkel`), for
     /// drawing the ink like a real pen onto a photo.
     pub skeleton: bool,
+    /// Which variants of each letter the text before this paragraph used
+    /// last (the previous paragraph's `deal`), so they do not repeat.
+    pub deal: Deal,
 }
 
 /// Size, colour index and raise (font units, up) of one character.
@@ -146,6 +150,8 @@ pub struct ParagraphRender {
     pub missing: Vec<String>,
     /// Characters without samples, to be drawn with a fallback font (y down, on the baseline).
     pub fallback: Vec<FallbackChar>,
+    /// The variants used last after this paragraph: pass it on to the next one.
+    pub deal: Deal,
 }
 
 #[derive(Serialize)]
@@ -378,7 +384,7 @@ impl EngineCore {
             (0..n)
                 .map(|k| {
                     let mut rng = Rng::new(mix(mix(seed, salt), k as u64));
-                    synth::synthesize(&data.prepared, &data.model, Some(k), position, &mut rng, &self.style, &self.joins, true)
+                    synth::synthesize(&data.prepared, &data.model, Choice::Slot(k), position, &mut rng, &self.style, &self.joins, true)
                 })
                 .collect()
         };
@@ -455,7 +461,7 @@ impl EngineCore {
         (0..count.min(64))
             .map(|i| {
                 let mut rng = Rng::new(mix(mix(self.key_seed(key), seed as u64), i as u64));
-                let ink = synth::synthesize(&data.prepared, &data.model, None, Position::Any, &mut rng, &self.style, &self.joins, true);
+                let ink = synth::synthesize(&data.prepared, &data.model, Choice::Random, Position::Any, &mut rng, &self.style, &self.joins, true);
                 let (polys, pl, _) = self.finish(&ink);
                 let mut d = String::new();
                 outline::svg_path(&polys, -pl.origin_x, 0.0, true, &mut d);
@@ -488,7 +494,9 @@ impl EngineCore {
     ///
     /// Randomness is seeded by the words themselves and how often each occurred
     /// before (plus `seed`, per document), so editing one word never
-    /// re-shuffles the letters of the others.
+    /// re-shuffles the letters of the others. Which written variant a letter
+    /// starts from is dealt in reading order (`styles.deal`, see [`Deal`]):
+    /// adding or removing a letter moves the variants of that letter after it.
     pub fn render_paragraph(
         &self,
         text: &str,
@@ -507,6 +515,7 @@ impl EngineCore {
 
         let style = &self.style;
         let doc_seed = mix(seed as u64, style.seed as u64);
+        let mut deal = styles.deal.clone();
         let mut missing: Vec<String> = Vec::new();
         let mut seen: HashMap<u64, u64> = HashMap::new();
         let chars: Vec<char> = text.chars().collect();
@@ -536,7 +545,7 @@ impl EngineCore {
                 shift: styles.shifts.get(k).copied().unwrap_or(0.0).clamp(-2.0, 2.0) * UNITS_PER_EM as f64,
             };
             let word_styles: Vec<CharStyle> = (i..end).map(char_style).collect();
-            let items = self.word_items(&chars[i..end], wseed, fallback_widths, &mut missing, &word_styles);
+            let items = self.word_items(&chars[i..end], wseed, fallback_widths, &mut missing, &word_styles, &mut deal);
             words.push(Word { items, seed: wseed, hash, space_after: 0.0 });
             i = end;
         }
@@ -625,6 +634,7 @@ impl EngineCore {
             line_skel,
             missing,
             fallback,
+            deal,
         }
     }
 
@@ -655,7 +665,19 @@ impl EngineCore {
     /// its lead-in when it has one, otherwise (`bridge`) the first point of the
     /// letter. A start inside the letter's own width (the top of the bowl of
     /// «а», «d», «о») is reached over the top of the bowl. Nothing is bent.
-    fn joined_ink(&self, ink: &mut GlyphInk, bridge: bool, prev: Option<Exit>, prev_profile: Option<&(Profile, f64)>, scale: f64) -> Placed {
+    ///
+    /// The pen does not lift at a join: the connecting stroke keeps the
+    /// thickness the previous letter ends with, and the ends that join (this
+    /// letter's start, and its exit when `next_joins`) lose their thinning.
+    fn joined_ink(
+        &self,
+        ink: &mut GlyphInk,
+        bridge: bool,
+        prev: Option<Exit>,
+        prev_profile: Option<&(Profile, f64)>,
+        scale: f64,
+        next_joins: bool,
+    ) -> Placed {
         let style = &self.style;
         let sb = style.letter_spacing;
         let radius = style.weight / 2.0;
@@ -666,6 +688,8 @@ impl EngineCore {
             None => None,
         });
         let mut joined = false;
+        // The connecting stroke's centre line and where it goes in: (points, stroke, at its start?).
+        let mut lead_in: Option<(Stroke, usize, bool)> = None;
         let origin = match (prev, start) {
             (Some(p), Some((si, at_start, written))) => {
                 let py = p.y / scale;
@@ -699,7 +723,7 @@ impl EngineCore {
                     origin -= need.min(400.0) / scale;
                 }
                 let s = &ink.strokes[si];
-                let from = Pt::new(origin, py, p.p);
+                let from = Pt::new(origin, py, e.p);
                 let inward = {
                     let o = synth::outward(s, at_start);
                     (-o.0, -o.1)
@@ -712,19 +736,35 @@ impl EngineCore {
                     let l = (dx * dx + dy * dy).sqrt().max(1e-9);
                     (dx / l, dy / l)
                 };
-                let lead = synth::connector(from, p.dir, e, in_dir, over);
-                let s = &mut ink.strokes[si];
-                if at_start {
-                    s.splice(0..0, lead);
-                } else {
-                    s.extend(lead.into_iter().rev());
-                }
+                lead_in = Some((synth::connector(from, p.dir, e, in_dir, over), si, at_start));
+                synth::untaper(&mut ink.strokes[si], at_start);
                 joined = true;
                 origin
             }
             _ => f64::NAN,
         };
+        // Where the next letter's connecting stroke starts.
+        let exit_end = ink.exit.and_then(|x| synth::end_at(&ink.strokes, x.x, x.y));
+        if let (true, Some((si, at))) = (next_joins, exit_end) {
+            synth::untaper(&mut ink.strokes[si], at);
+        }
         let mut skel = outline::skeleton(ink, style);
+        let exit = exit_end.map(|(si, at)| {
+            let (s, line) = (&ink.strokes[si], &skel[si]);
+            let (q, k) = if at { (s[0], line[0]) } else { (s[s.len() - 1], line[line.len() - 1]) };
+            Exit { y: q.y * scale, dir: synth::outward(s, at), r: k[2] * scale, pn: k[3], scale, shift: 0.0 }
+        });
+        // The connecting stroke, drawn as thick as the previous letter ends (not part of this letter's pressure).
+        if let (Some((lead, si, at_start)), Some(p)) = (lead_in, prev) {
+            let line = &mut skel[si];
+            let to = if at_start { line[0] } else { line[line.len() - 1] };
+            let pts = connector_skeleton(&lead, [p.r / scale, p.pn], [to[2], to[3]]);
+            if at_start {
+                line.splice(0..0, pts);
+            } else {
+                line.extend(pts.into_iter().rev());
+            }
+        }
         let discs = outline::discs_of(&skel);
         let bbox = outline::ink_bbox(&discs);
         let mut polys = outline::polygons(&discs);
@@ -744,17 +784,15 @@ impl EngineCore {
         }
         let advance = ((right - origin) * scale).max(20.0);
         let profile = Profile::of(&polys, -origin);
-        // Where the next letter's connecting stroke starts.
-        let exit = ink.exit.and_then(|x| synth::end_at(&ink.strokes, x.x, x.y)).map(|(si, at)| {
-            let s = &ink.strokes[si];
-            let q = if at { s[0] } else { s[s.len() - 1] };
-            Exit { y: q.y * scale, dir: synth::outward(s, at), p: q.p, scale, shift: 0.0 }
-        });
         Placed { polys, skel, origin, advance, profile, joined, exit }
     }
 
     /// Letters of one word: pairs where recorded, joins adapted to the
     /// neighbour's exit height, optical kerning between letters that do not join.
+    ///
+    /// Every letter is synthesized first (its written variant dealt from
+    /// `deal`), then they are placed: by then it is known which letters join,
+    /// so the ends that join are drawn without the thinning of a lifting pen.
     fn word_items(
         &self,
         chars: &[char],
@@ -762,20 +800,27 @@ impl EngineCore {
         fallback_widths: &HashMap<String, f64>,
         missing: &mut Vec<String>,
         char_styles: &[CharStyle],
+        deal: &mut Deal,
     ) -> Vec<Item> {
+        /// A letter (or pair) of the word before it is placed; `ink` is None without samples.
+        struct Letter {
+            key: String,
+            ink: Option<GlyphInk>,
+            pos: (usize, usize),
+            style: CharStyle,
+            /// Takes a connecting stroke into a start written without a lead-in.
+            lowercase: bool,
+        }
+
         let style = &self.style;
-        let mut out: Vec<Item> = Vec::new();
-        let mut prev_exit: Option<Level> = None;
-        let mut prev_join: Option<Exit> = None;
-        let mut prev_profile: Option<(Profile, f64)> = None;
-        let mut i = 0;
         let letters = chars.len();
         let isolated = |i: usize| abbreviation_letter(chars, i);
         // Ink joins letters by connecting strokes; the font's way (bending ends onto two lines) otherwise.
         let bridged = style.bridge && style.connect;
+        let mut word: Vec<Letter> = Vec::new();
+        let mut i = 0;
         while i < chars.len() {
             let mut rng = Rng::new(mix(wseed, i as u64));
-            let CharStyle { scale, color, shift } = char_styles.get(i).copied().unwrap_or_default();
             // Prefer a recorded pair (3, then 2 letters) most of the time — not inside abbreviations.
             let mut take = 1;
             if style.pairs && !isolated(i) && rng.f64() < 0.75 {
@@ -790,39 +835,63 @@ impl EngineCore {
                 }
             }
             let key: String = chars[i..i + take].iter().collect();
-            let pos = (i, letters);
-            match self.keys.get(&key) {
-                Some(data) => {
-                    // Abbreviation letters stand alone; the first letter of a word prefers
-                    // variants written without a joining entry; the last letter goes without
-                    // a tail. Inside a word ink takes any variant (the connecting stroke joins
-                    // it); the font only those written to join on the left.
-                    let letter = key.chars().all(char::is_alphabetic);
-                    let after_letter = i > 0 && chars[i - 1].is_alphabetic();
-                    let before_letter = chars.get(i + take).is_some_and(|c| c.is_alphabetic());
-                    let position = if isolated(i) {
-                        Position::Isolated
-                    } else if letter && !before_letter {
-                        match (after_letter, bridged) {
-                            (false, _) => Position::Single,
-                            (true, true) => Position::End,
-                            (true, false) => Position::Final,
-                        }
-                    } else if !after_letter {
-                        Position::Initial
-                    } else if bridged {
-                        Position::Inside
-                    } else {
-                        Position::Medial
-                    };
-                    let mut ink = synth::synthesize(&data.prepared, &data.model, None, position, &mut rng, style, &self.joins, !bridged);
+            let letter = key.chars().all(char::is_alphabetic);
+            let ink = self.keys.get(&key).map(|data| {
+                // Abbreviation letters stand alone, and so do one-letter words (and a letter
+                // before digits: M₄₁). Otherwise the place in the word picks the variants
+                // (see `Position`); the font joins only those written to join on the left.
+                let after_letter = i > 0 && chars[i - 1].is_alphabetic();
+                let before_letter = chars.get(i + take).is_some_and(|c| c.is_alphabetic());
+                let position = if isolated(i) {
+                    Position::Isolated
+                } else if letter && !before_letter {
+                    match (after_letter, bridged) {
+                        (false, _) => Position::Single,
+                        (true, true) => Position::End,
+                        (true, false) => Position::Final,
+                    }
+                } else if !after_letter {
+                    Position::Initial
+                } else if bridged {
+                    Position::Inside
+                } else {
+                    Position::Medial
+                };
+                let pick = deal.pick(&key, &position.pool(&data.prepared), &mut rng);
+                synth::synthesize(&data.prepared, &data.model, Choice::Variant(pick), position, &mut rng, style, &self.joins, !bridged)
+            });
+            let lowercase = letter && !key.chars().any(char::is_uppercase);
+            word.push(Letter { key, ink, pos: (i, letters), style: char_styles.get(i).copied().unwrap_or_default(), lowercase });
+            i += take;
+        }
+
+        // Which letters the ink joins to the one before: the previous one leaves by an
+        // exit, this one has a start the pen can arrive at, and both are alike in size.
+        let leaves = |l: &Letter| l.ink.as_ref().is_some_and(|ink| ink.exit.is_some_and(|x| synth::end_at(&ink.strokes, x.x, x.y).is_some()));
+        let arrives = |l: &Letter| {
+            l.ink.as_ref().is_some_and(|ink| match ink.entry {
+                Some(e) => synth::end_at(&ink.strokes, e.x, e.y).is_some(),
+                None => l.lowercase && synth::lead_stroke(&ink.strokes).is_some(),
+            })
+        };
+        let alike = |a: &CharStyle, b: &CharStyle| (a.scale - b.scale).abs() < 1e-6 && (a.shift - b.shift).abs() < 1e-6;
+        let joins: Vec<bool> =
+            (0..word.len()).map(|j| bridged && j > 0 && leaves(&word[j - 1]) && arrives(&word[j]) && alike(&word[j - 1].style, &word[j].style)).collect();
+
+        let mut out: Vec<Item> = Vec::new();
+        let mut prev_exit: Option<Level> = None;
+        let mut prev_join: Option<Exit> = None;
+        let mut prev_profile: Option<(Profile, f64)> = None;
+        for (j, l) in word.iter_mut().enumerate() {
+            let CharStyle { scale, color, shift } = l.style;
+            match l.ink.as_mut() {
+                Some(ink) => {
                     let placed = if bridged {
-                        // Only lowercase letters take a connecting stroke into a start written without a lead-in.
-                        let lowercase = letter && !key.chars().any(char::is_uppercase);
                         let prev = prev_join.filter(|p| (p.scale - scale).abs() < 1e-6 && (p.shift - shift).abs() < 1e-6);
-                        self.joined_ink(&mut ink, lowercase, prev, prev_profile.as_ref(), scale)
+                        let next_joins = joins.get(j + 1).copied().unwrap_or(false);
+                        self.joined_ink(ink, l.lowercase, prev, prev_profile.as_ref(), scale, next_joins)
                     } else {
-                        self.snapped_ink(&mut ink, prev_exit, prev_profile.as_ref(), scale)
+                        self.snapped_ink(ink, prev_exit, prev_profile.as_ref(), scale)
                     };
                     if let (false, true, Some((pp, padv))) = (placed.joined, style.kerning, prev_profile.as_ref()) {
                         let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
@@ -834,15 +903,15 @@ impl EngineCore {
                     prev_exit = ink.exit.map(|j| j.level);
                     prev_join = placed.exit.map(|e| Exit { scale, shift, ..e });
                     prev_profile = Some((placed.profile, placed.advance));
-                    out.push(Item { polys: placed.polys, skel: placed.skel, origin: placed.origin, advance: placed.advance, fallback: None, pos, scale, color, shift });
+                    out.push(Item { polys: placed.polys, skel: placed.skel, origin: placed.origin, advance: placed.advance, fallback: None, pos: l.pos, scale, color, shift });
                 }
                 None => {
-                    let s = key.clone();
+                    let s = l.key.clone();
                     // Measured width of the fallback glyph, or a rough guess.
                     let advance = fallback_widths
                         .get(&s)
                         .copied()
-                        .unwrap_or(if chars[i].is_alphanumeric() { 560.0 } else { 320.0 })
+                        .unwrap_or(if chars[l.pos.0].is_alphanumeric() { 560.0 } else { 320.0 })
                         * scale;
                     if !missing.contains(&s) {
                         missing.push(s.clone());
@@ -850,10 +919,9 @@ impl EngineCore {
                     prev_exit = None;
                     prev_join = None;
                     prev_profile = None;
-                    out.push(Item { polys: vec![], skel: vec![], origin: 0.0, advance, fallback: Some(s), pos, scale, color, shift });
+                    out.push(Item { polys: vec![], skel: vec![], origin: 0.0, advance, fallback: Some(s), pos: l.pos, scale, color, shift });
                 }
             }
-            i += take;
         }
         // Before a space: ink past the last letter's advance (a joining exit inside a
         // loop) must not eat the space.
@@ -869,15 +937,32 @@ impl EngineCore {
 }
 
 /// Where a letter leaves towards the next one (ink joins): the height in
-/// font units above the baseline, the direction the pen moves, its pressure,
-/// and the letter's size and raise (only letters alike are joined).
+/// font units above the baseline, the direction the pen moves, the pen's
+/// radius there (font units, at the letter's size) and its pressure, and the
+/// letter's size and raise (only letters alike are joined).
 #[derive(Clone, Copy)]
 struct Exit {
     y: f64,
     dir: (f64, f64),
-    p: f64,
+    r: f64,
+    pn: f64,
     scale: f64,
     shift: f64,
+}
+
+/// Centre line of a connecting stroke, (x, y, radius, pressure) per point:
+/// as thick as the previous letter ends (`from`: radius, pressure) along the
+/// way, eased into the next letter's own start (`to`) over the last quarter.
+fn connector_skeleton(lead: &Stroke, from: [f64; 2], to: [f64; 2]) -> Vec<[f64; 4]> {
+    let n = lead.len().max(1) as f64;
+    lead.iter()
+        .enumerate()
+        .map(|(j, q)| {
+            let u = ((j as f64 / n - 0.75) / 0.25).clamp(0.0, 1.0);
+            let w = u * u * (3.0 - 2.0 * u);
+            [q.x, q.y, from[0] + (to[0] - from[0]) * w, from[1] + (to[1] - from[1]) * w]
+        })
+        .collect()
 }
 
 /// A letter laid out in ink: outline, origin and advance, kerning profile,
@@ -1082,8 +1167,8 @@ mod tests {
         // depends on the document seed and the word itself, not on its position.
         let chars: Vec<char> = "мама".chars().collect();
         let seed = mix(mix(mix(1, e.style.seed as u64), hash_str("мама")), 0);
-        let a = e.word_items(&chars, seed, &HashMap::new(), &mut vec![], &[]);
-        let b = e.word_items(&chars, seed, &HashMap::new(), &mut vec![], &[]);
+        let a = e.word_items(&chars, seed, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
+        let b = e.word_items(&chars, seed, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
         assert_eq!(a.len(), 4);
         assert!(a.iter().zip(&b).all(|(x, y)| x.polys == y.polys && x.advance == y.advance));
     }
@@ -1161,10 +1246,10 @@ mod tests {
         e.set_samples(vec![wave_sample("1", "м", 300.0, true), from_the_top("2", "т")]);
         let chars: Vec<char> = "мт".chars().collect();
         let left_of = |it: &Item| it.polys.iter().flatten().map(|p| p[0]).fold(f64::INFINITY, f64::min) - it.origin;
-        let joined = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[]);
+        let joined = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
         assert!(left_of(&joined[1]) < 5.0, "the connecting stroke starts where «м» leaves: {}", left_of(&joined[1]));
         e.set_style(Style { bridge: false, ..Style::default() });
-        let apart = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[]);
+        let apart = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
         assert!(left_of(&apart[1]) > 20.0, "without connecting strokes «т» stands apart: {}", left_of(&apart[1]));
     }
 
@@ -1179,12 +1264,98 @@ mod tests {
         let chars: Vec<char> = "мтм".chars().collect();
         let leads = (0..40u64)
             .filter(|&w| {
-                let items = e.word_items(&chars, w, &HashMap::new(), &mut vec![], &[]);
+                let items = e.word_items(&chars, w, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
                 // The wave «т» is 230 tall, the one from the top 420.
                 items[1].polys.iter().flatten().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max) < 330.0
             })
             .count();
         assert!(leads > 2 && leads < 25, "the variant with a lead-in is one of four, not the only one: {leads} of 40");
+    }
+
+    /// «м» written nine ways, 250…490 tall: six joining on both sides, two ending words, one starting them.
+    fn nine_m() -> Vec<Sample> {
+        (0..9)
+            .map(|k| {
+                let mut s = wave_sample(&format!("m{k}"), "м", 250.0 + 30.0 * k as f64, true);
+                s.entry.as_mut().unwrap().connect = k != 8;
+                s.exit.as_mut().unwrap().connect = !(6..8).contains(&k);
+                s
+            })
+            .collect()
+    }
+
+    /// Which of `nine_m` a placed letter is, by its height.
+    fn which_m(e: &EngineCore, it: &Item) -> usize {
+        let top = it.polys.iter().flatten().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+        ((top - 280.0 - e.style.weight / 2.0) / 30.0).round() as usize
+    }
+
+    #[test]
+    fn a_lone_letter_takes_all_its_variants_in_turn() {
+        // m₄₁, m₄₂…: a letter before digits stands alone. None was written alone, so all nine are adapted to it.
+        let mut e = EngineCore::new();
+        e.set_style(Style { interpolate: false, jitter: 0.0, ..Style::default() });
+        e.set_samples(nine_m());
+        let chars: Vec<char> = "м4".chars().collect();
+        let mut deal = Deal::default();
+        let got: Vec<usize> = (0..27).map(|w| which_m(&e, &e.word_items(&chars, w, &HashMap::new(), &mut vec![], &[], &mut deal)[0])).collect();
+        assert!(got.windows(2).all(|w| w[0] != w[1]), "never twice in a row: {got:?}");
+        let first: std::collections::BTreeSet<usize> = got[..9].iter().copied().collect();
+        assert_eq!(first, (0..9).collect(), "all nine before any repeats: {got:?}");
+    }
+
+    #[test]
+    fn places_in_a_word_take_their_own_variants() {
+        let mut e = EngineCore::new();
+        e.set_style(Style { interpolate: false, jitter: 0.0, pairs: false, ..Style::default() });
+        e.set_samples(nine_m());
+        let mut deal = Deal::default();
+        let chars: Vec<char> = "ммм".chars().collect();
+        for w in 0..12 {
+            let items = e.word_items(&chars, w, &HashMap::new(), &mut vec![], &[], &mut deal);
+            let got: Vec<usize> = items.iter().map(|it| which_m(&e, it)).collect();
+            // The start has one own variant (8) and takes the six joining ones too; the middle has six of its own.
+            assert!(got[0] == 8 || got[0] < 6, "start: {got:?}");
+            assert!(got[1] < 6, "middle: only variants with an entry and an exit: {got:?}");
+            // The end has two own variants (6, 7) and takes the joining ones with their tail cut.
+            assert!(got[2] < 8, "end: {got:?}");
+        }
+    }
+
+    #[test]
+    fn the_deal_goes_on_from_paragraph_to_paragraph() {
+        let mut e = EngineCore::new();
+        e.set_samples(nine_m());
+        let first = e.render_paragraph("м4 м4", 9000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        assert_eq!(first.deal.0["м"].len(), 2, "two variants used: {:?}", first.deal);
+        let fresh = e.render_paragraph("м4", 9000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        let after = e.render_paragraph("м4", 9000.0, 1500.0, 1, &HashMap::new(), &CharStyles { deal: first.deal.clone(), ..Default::default() });
+        assert_ne!(fresh.d, after.d, "the next paragraph goes on with the variants not used yet");
+        assert_eq!(after.deal.0["м"].len(), 3);
+    }
+
+    #[test]
+    fn a_join_is_as_thick_as_the_letter_it_leaves() {
+        // Mouse samples: their ends are thinned like a lifting pen.
+        let mut e = EngineCore::new();
+        e.set_style(Style { jitter: 0.0, interpolate: false, pairs: false, ..Style::default() });
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true)]);
+        let chars: Vec<char> = "мм".chars().collect();
+        let items = e.word_items(&chars, 1, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
+        let (a, b) = (&items[0], &items[1]);
+        let mut radii: Vec<f64> = a.skel.iter().flatten().map(|q| q[2]).collect();
+        radii.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let median = radii[radii.len() / 2];
+        let leaves = a.skel[0].last().unwrap()[2];
+        assert!(leaves > 0.92 * median, "the first «м» ends without thinning: {leaves} vs {median}");
+        // The second letter's stroke starts with the connecting stroke, at the first one's thickness.
+        let arrives = b.skel[0][0][2];
+        assert!((arrives - leaves).abs() < 0.02 * leaves, "connecting stroke {arrives} vs letter end {leaves}");
+        let thinnest = b.skel[0].iter().take(20).map(|q| q[2]).fold(f64::INFINITY, f64::min);
+        assert!(thinnest > 0.9 * leaves, "no thin neck along the join: {thinnest}");
+        // A word's last letter keeps its thin end: nothing joins it.
+        let last = b.skel[0].last().unwrap()[2];
+        assert!(last < leaves, "{last} vs {leaves}");
     }
 
     #[test]

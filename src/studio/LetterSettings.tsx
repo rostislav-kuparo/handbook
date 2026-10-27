@@ -14,7 +14,7 @@ const LETTERS: SliderDef[] = [
 export function LetterSettings() {
   const { style, building, lastBuildMs, samples, joinLow, joinHigh, derived, error } = useHandwriting();
   return (
-    <section className="panel">
+    <section className="panel float">
       <h3>Стиль букв</h3>
       {LETTERS.map((s) => (
         <Slider key={s.key} s={s} style={style} />
@@ -33,7 +33,6 @@ export function LetterSettings() {
           </>
         )}
       </p>
-      <p className="muted small">Интервалы, соединения и неровность строк — в «Документах», в меню ⚙ у кнопки «Отрендерить».</p>
     </section>
   );
 }

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_DRAW_PEN, drawPenOf, type DrawPen } from '../editor/page';
+import type { Deal } from '../engine/client';
 import { useHandwriting } from '../engine/handwriting';
 import { drawingSvg, drawSketch, linesOnly, penFor, sketchLayout, type Drawing } from './render';
 
@@ -16,6 +17,12 @@ interface Props {
   width?: number;
   /** Shown instead of an empty drawing. */
   placeholder?: string;
+  /**
+   * The letter variants the text before the drawing used last, so its labels
+   * go on from there (the rendered view); null: not known yet, the labels
+   * wait. Omitted: the drawing starts afresh (the editor).
+   */
+  deal?: Deal | null;
 }
 
 /**
@@ -23,7 +30,7 @@ interface Props {
  * as the engine has written them. The height is known up front, so nothing
  * around it jumps.
  */
-export function SketchFigure({ code, pen, fontSize, width, placeholder }: Props) {
+export function SketchFigure({ code, pen, fontSize, width, placeholder, deal }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [measured, setMeasured] = useState<{ w: number; fs: number } | null>(null);
   const { style, fontVersion } = useHandwriting();
@@ -54,16 +61,17 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder }: Props)
   );
 
   const [drawing, setDrawing] = useState<Drawing | null>(null);
+  const dealKey = deal === null ? null : JSON.stringify(deal ?? {});
   useEffect(() => {
-    if (!layout) return;
+    if (!layout || dealKey === null) return;
     let alive = true;
-    void drawSketch(layout).then((d) => {
+    void drawSketch(layout, JSON.parse(dealKey) as Deal).then((d) => {
       if (alive) setDrawing(d);
     });
     return () => {
       alive = false;
     };
-  }, [layout, fontVersion]);
+  }, [layout, fontVersion, dealKey]);
 
   // The previous drawing stays until the new labels are written (no flicker while typing).
   const html = useMemo(() => {

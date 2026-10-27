@@ -128,6 +128,50 @@ fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
   spawned.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Asks for a Handbook .json file (Открыть…, Загрузить почерк…) and returns its name and text;
+/// None when the dialog is cancelled. The window menu can't open the page's own file chooser.
+#[tauri::command]
+async fn pick_json(window: tauri::WebviewWindow) -> Result<Option<(String, String)>, String> {
+  #[cfg(windows)]
+  {
+    let Some(path) = rfd::FileDialog::new()
+      .set_parent(&window)
+      .add_filter("Handbook (.json)", &["json"])
+      .pick_file()
+    else {
+      return Ok(None);
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Some((name, text)))
+  }
+  #[cfg(not(windows))]
+  {
+    let _ = window;
+    Err("Открытие файлов из меню пока есть только в Windows.".into())
+  }
+}
+
+/// Opens Windows 11's snap layouts (Win+Z) for the app's window: the window draws its own
+/// maximise button, which Windows doesn't know about, so hovering it asks for them this way.
+#[tauri::command]
+fn snap_layouts() {
+  #[cfg(windows)]
+  unsafe {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+      INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN, VK_Z,
+    };
+    let key = |vk: u16, up: bool| INPUT {
+      r#type: INPUT_KEYBOARD,
+      Anonymous: INPUT_0 {
+        ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: 0 },
+      },
+    };
+    let inputs = [key(VK_LWIN, false), key(VK_Z, false), key(VK_Z, true), key(VK_LWIN, true)];
+    SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -141,7 +185,7 @@ pub fn run() {
       }
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![save_download, reveal_file, open_file])
+    .invoke_handler(tauri::generate_handler![save_download, reveal_file, open_file, pick_json, snap_layouts])
     .run(tauri::generate_context!())
     .expect("error while building tauri application");
 }

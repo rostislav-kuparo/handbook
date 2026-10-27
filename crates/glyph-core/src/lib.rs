@@ -4,6 +4,7 @@
 //! stroke cleanup, variant synthesis, outlines, font compilation and ink
 //! rendering — happens here; the UI only captures strokes and shows results.
 
+mod deal;
 mod derive;
 mod engine;
 mod font;

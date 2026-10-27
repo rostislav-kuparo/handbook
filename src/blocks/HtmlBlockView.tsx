@@ -16,7 +16,7 @@ import { SketchPanel } from '../sketch/SketchPanel';
 
 const MAX_DATA_BYTES = 500_000;
 
-export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: NodeViewProps) {
+export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNode, selected }: NodeViewProps) {
   const attrs = node.attrs as HtmlBlockAttrs;
   const attrsRef = useRef(attrs);
   attrsRef.current = attrs;
@@ -162,8 +162,29 @@ export function HtmlBlockView({ node, updateAttributes, deleteNode, selected }: 
     if (!el || !editorRoot) return;
     const a = el.getBoundingClientRect();
     const b = editorRoot.getBoundingClientRect();
-    // Stay exactly where it is now; only stop taking room in the text.
-    updateAttributes({ float: true, x: Math.round(a.left - b.left), y: Math.round(a.top - b.top), w: Math.round(Math.min(a.width, 460)) });
+    const pos = getPos();
+    if (typeof pos !== 'number') return;
+    // Empty lines take the room the block leaves, so the text below stays where it was
+    // (an open commands/data panel doesn't count: it isn't part of the figure).
+    const lh = (parseFloat(getComputedStyle(editorRoot).fontSize) || 16) * LINE_HEIGHT_EM;
+    const panelH = el.querySelector('.html-block-panel')?.getBoundingClientRect().height ?? 0;
+    const lines = Math.max(1, Math.ceil((a.height - panelH) / lh - 0.05));
+    const paragraph = editor.schema.nodes.paragraph;
+    // Stay exactly where it is now; only stop taking room in the text. One undo step.
+    editor
+      .chain()
+      .command(({ tr }) => {
+        tr.setNodeMarkup(pos, undefined, {
+          ...node.attrs,
+          float: true,
+          x: Math.round(a.left - b.left),
+          y: Math.round(a.top - b.top),
+          w: Math.round(Math.min(a.width, 460)),
+        });
+        tr.insert(pos + node.nodeSize, Array.from({ length: lines }, () => paragraph.create()));
+        return true;
+      })
+      .run();
   };
 
   const startDrag = (e: React.PointerEvent, mode: 'move' | 'resize') => {

@@ -17,6 +17,9 @@
   --margin-line: rgba(217, 83, 63, 0.35);
   --grid-line: rgba(70, 105, 170, 0.14);
   --shadow: 0 1px 2px rgba(40, 30, 10, 0.08), 0 8px 28px rgba(40, 30, 10, 0.1);
+  /* Floating blocks: cards and buttons hovering over the desk, without frames. */
+  --float: color-mix(in srgb, var(--panel) 86%, transparent);
+  --float-shadow: 0 1px 2px rgba(40, 30, 10, 0.06), 0 6px 24px rgba(40, 30, 10, 0.09);
   --hand: 'HandbookHand', 'Segoe Print', 'Bradley Hand', cursive;
   /* How much of the pen colour shows; 100% on light paper. */
   --pen-mix: 100%;
@@ -41,6 +44,7 @@
     --grid-line: rgba(140, 165, 230, 0.12);
     --margin-line: rgba(230, 110, 90, 0.35);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.35);
+    --float-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.38);
     /* Pens are made for light paper: on dark paper they are drawn as a light tint. */
     --pen-mix: 42%;
     color-scheme: dark;
@@ -62,6 +66,7 @@
   --grid-line: rgba(140, 165, 230, 0.12);
   --margin-line: rgba(230, 110, 90, 0.35);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.35);
+  --float-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.38);
   /* Pens are made for light paper: on dark paper they are drawn as a light tint. */
   --pen-mix: 42%;
   color-scheme: dark;
@@ -72,6 +77,43 @@
 
 * {
   box-sizing: border-box;
+  /* No scrollbars anywhere: everything still scrolls with the wheel, touchpad and pen. */
+  scrollbar-width: none;
+}
+::-webkit-scrollbar {
+  display: none;
+}
+/* A scrolling list fades out at an edge with more behind it; nothing fades when it all fits. */
+@property --fade-start {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+@property --fade-end {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+.fade-scroll {
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-start), #000 calc(100% - var(--fade-end)), transparent);
+  animation: fade-scroll linear both;
+  animation-timeline: scroll(self);
+}
+@keyframes fade-scroll {
+  from {
+    --fade-start: 0px;
+    --fade-end: 28px;
+  }
+  8% {
+    --fade-start: 28px;
+  }
+  92% {
+    --fade-end: 28px;
+  }
+  to {
+    --fade-start: 28px;
+    --fade-end: 0px;
+  }
 }
 html,
 body,
@@ -149,9 +191,6 @@ kbd {
 .btn.wide {
   width: 100%;
 }
-.btn.open-doc {
-  margin-top: 6px;
-}
 
 /* ---------- app shell ---------- */
 .app {
@@ -160,44 +199,143 @@ kbd {
   height: 100%;
   overflow: hidden;
 }
-.topbar {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  height: 52px;
-  padding: 0 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+/* A floating card or button: no frame, a soft shadow over the desk. */
+.float {
+  background: var(--float);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--float-shadow);
+  border-radius: 16px;
 }
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.tabs {
-  display: flex;
-  gap: 4px;
-  background: var(--desk);
+/* A segmented switch: «Документы | Почерк», «Строки | Текст», the alphabet's shelves. */
+.pill {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
   padding: 3px;
-  border-radius: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 60%, transparent);
 }
-.tabs button {
+.pill button {
+  position: relative;
   border: 0;
   background: transparent;
-  padding: 6px 18px;
-  border-radius: 8px;
+  color: var(--muted);
+  padding: 5px 14px;
+  border-radius: 999px;
   cursor: pointer;
+  white-space: nowrap;
 }
-.tabs button.active {
+.pill button:hover:not(:disabled):not(.on) {
+  color: var(--text);
+}
+.pill button.on {
   background: var(--panel);
+  color: var(--text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   font-weight: 600;
 }
-.font-status {
-  color: var(--muted);
-  font-size: 12px;
+.pill button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.pill.small button {
+  padding: 3px 10px;
+  font-size: 12.5px;
+}
+.pill.float {
+  padding: 4px;
+  background: var(--float);
+}
+/* The tabs float in the top left corner, over «Недавние» and the alphabet (they keep --tabs-room free). */
+:root {
+  --tabs-room: 54px;
+}
+.tabs {
+  position: fixed;
+  left: 16px;
+  top: 50px;
+  z-index: 40;
+}
+.tabs button {
+  padding: 6px 18px;
+}
+.tab-busy {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+/* The title bar: the app's name, its menu, the window buttons; the window has no frame of its own. */
+.titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding-left: 12px;
+  user-select: none;
+}
+.titlebar-icon {
+  flex: none;
+}
+.titlebar-name {
+  font-size: 12.5px;
+  margin-right: 10px;
+}
+.titlebar-drag {
+  flex: 1;
+  align-self: stretch;
+}
+.window-buttons {
+  display: flex;
+  align-self: stretch;
+}
+.window-buttons button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+.window-buttons button:hover {
+  background: color-mix(in srgb, var(--line) 75%, transparent);
+}
+.window-buttons button.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+.web-menu {
+  display: flex;
+  gap: 2px;
+  font-size: 13px;
+}
+.web-menu summary {
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.web-menu summary:hover,
+.web-menu details[open] > summary {
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+}
+.web-menu .menu-items {
+  z-index: 60;
+  min-width: 290px;
+}
+.web-menu .menu-items > button {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.web-menu kbd {
+  margin-left: auto;
+}
+.web-menu-tick {
+  flex: none;
+  width: 14px;
 }
 .pulse {
   animation: pulse 1s ease-in-out infinite alternate;
@@ -214,31 +352,51 @@ kbd {
 
 /* ---------- documents ---------- */
 .documents {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
 }
-.doc-list {
-  width: 250px;
+/* «Недавние»: a floating card on the left, as tall as its list. */
+.recents {
   flex: none;
-  padding: 14px;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  width: 230px;
+  max-height: calc(100% - 32px - var(--tabs-room));
+  margin: calc(16px + var(--tabs-room)) 0 16px 16px;
+  padding: 12px 8px 8px;
+  z-index: 25;
+}
+.recents-head {
+  margin: 0 8px 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.recents ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   overflow: auto;
   overscroll-behavior: contain;
 }
-.doc-list ul {
-  list-style: none;
-  margin: 12px 0;
-  padding: 0;
-}
-.doc-list li {
+.recents li {
   display: flex;
   align-items: stretch;
-  border-radius: 8px;
+  border-radius: 10px;
 }
-.doc-list li.active {
-  background: var(--desk);
+.recents li.active {
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+}
+.recents li:hover .doc-action {
+  opacity: 1;
+}
+.recents-note {
+  margin: 8px 8px 2px;
 }
 .doc-link {
   flex: 1;
@@ -252,50 +410,153 @@ kbd {
   flex-direction: column;
 }
 .doc-title {
-  font-size: 19px;
-  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.doc-delete {
+.doc-action {
   border: 0;
   background: none;
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  padding: 0 8px;
+  padding: 0 5px;
 }
-.doc-list li:hover .doc-delete {
-  opacity: 1;
+.doc-action:hover {
+  color: var(--text);
 }
-.hint-card {
-  background: var(--desk);
-  border-radius: 10px;
-  padding: 10px 12px;
-  color: var(--muted);
-  font-size: 12px;
+.doc-delete {
+  padding-right: 8px;
+}
+.doc-delete:hover {
+  color: var(--red);
+}
+.doc-rename {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  padding: 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+}
+/* A narrow window: «Недавние» fold into their heading and open over the desk on hover. */
+@media (max-width: 1180px) {
+  .recents {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: auto;
+    padding: 8px 14px;
+  }
+  .recents:not(:hover):not(:focus-within) ul,
+  .recents:not(:hover):not(:focus-within) .recents-note {
+    display: none;
+  }
+  .recents:not(:hover):not(:focus-within) .recents-head {
+    margin: 0;
+  }
+  .recents:hover,
+  .recents:focus-within {
+    width: 230px;
+    padding: 12px 8px 8px;
+  }
 }
 .doc-main {
   flex: 1;
+  min-width: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 0 24px 60px;
+  /* Room for the tool rail on the right and the floating corners. */
+  padding: 24px 108px 80px 24px;
 }
-.toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
+
+/* ---------- tool rail: the document's tools, floating at the right edge ---------- */
+.tool-rail {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+}
+.rail-btn,
+.corner-btn {
+  display: grid;
+  place-items: center;
+  width: 57px;
+  height: 57px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.rail-btn svg,
+.corner-btn svg,
+.exports-btn svg {
+  width: 30px;
+  height: 30px;
+}
+.rail-btn:hover {
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+}
+.rail-btn.on,
+.tool-rail details[open] > .rail-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.rail-sep {
+  width: 33px;
+  height: 1px;
+  margin: 6px 0;
+  background: var(--line);
+}
+/* Its menus open to the left, centred on the rail, so they never leave the window. */
+.tool-rail .menu {
+  position: static;
+}
+.tool-rail .menu-items {
+  top: 50%;
+  left: auto;
+  right: calc(100% + 12px);
+  transform: translateY(-50%);
+  max-height: calc(100vh - 82px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* ---------- floating top corner: export and its history ---------- */
+.corner-top {
+  position: fixed;
+  top: 50px;
+  right: 16px;
+  z-index: 50;
   display: flex;
   gap: 8px;
   align-items: center;
-  max-width: 794px;
-  margin: 0 auto;
-  padding: 12px 0;
-  background: linear-gradient(var(--desk) 75%, transparent);
 }
-.push-right {
-  margin-left: auto;
+.corner-btn {
+  border-radius: 18px;
+}
+.corner-btn:hover {
+  color: var(--accent);
+}
+.corner-top details[open] > .corner-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.corner-top .menu-items {
+  top: calc(100% + 8px);
 }
 .menu {
   position: relative;
@@ -313,10 +574,12 @@ kbd {
   z-index: 30;
   min-width: 250px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 14px;
   box-shadow: var(--shadow);
   padding: 4px;
+}
+.menu summary {
+  cursor: pointer;
 }
 .menu.right .menu-items {
   left: auto;
@@ -335,7 +598,7 @@ kbd {
   cursor: pointer;
 }
 .menu-items > button:hover:not(:disabled) {
-  background: var(--desk);
+  background: color-mix(in srgb, var(--line) 50%, transparent);
 }
 .menu-items > button:disabled {
   opacity: 0.4;
@@ -611,12 +874,22 @@ kbd {
 .draw-pen-sliders .link-btn {
   align-self: flex-start;
 }
-.page-menu-drawings {
+/* ---------- drawings menu ---------- */
+.sketch-menu {
+  width: 290px;
+}
+.sketch-menu-pen {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-top: 8px;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px;
   border-top: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.menu-label {
+  font-size: 12px;
+  color: var(--muted);
 }
 .html-block-frame {
   /* Same color-scheme as the page, so the frame stays transparent and blocks follow the theme. */
@@ -707,10 +980,23 @@ kbd {
   max-height: min(88vh, 1000px);
   background: var(--panel);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
   font: 14px/1.45 system-ui, sans-serif;
+}
+.help-dialog {
+  width: min(760px, 100%);
+}
+.help-dialog.narrow {
+  width: min(520px, 100%);
+}
+.about-name {
+  font-size: 20px;
+  font-weight: 600;
+  margin-top: 6px !important;
+}
+.about .row code {
+  user-select: all;
 }
 .sketch-help-top {
   display: flex;
@@ -944,8 +1230,7 @@ kbd {
   position: fixed;
   z-index: 50;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
   padding: 10px;
   display: flex;
@@ -972,23 +1257,58 @@ kbd {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr) 300px;
+  grid-template-columns: 260px minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
 }
-.alphabet,
-.side {
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 14px;
-  background: var(--panel);
-}
-.alphabet {
-  border-right: 1px solid var(--line);
-}
-.side {
-  border-left: 1px solid var(--line);
+.alphabet-col {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
+  padding: calc(16px + var(--tabs-room)) 0 16px 16px;
+}
+.alphabet {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px 10px 10px;
+}
+.alphabet-groups {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 3px 6px;
+}
+.alphabet-pills {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+.group-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 8px;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.group-progress-track {
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+}
+/* The right column: cards floating under the top corner. */
+.side {
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px 16px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .alphabet h4 {
   margin: 10px 0 6px;
@@ -1006,7 +1326,7 @@ kbd {
 .char-cell {
   position: relative;
   height: 36px;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
   border-radius: 7px;
   background: var(--paper);
   cursor: pointer;
@@ -1060,23 +1380,7 @@ kbd {
 .workbench {
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 16px 24px 40px;
-}
-.progress {
-  max-width: 760px;
-  margin-bottom: 12px;
-}
-.progress-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 4px;
-}
-.progress-track {
-  height: 8px;
-  border-radius: 999px;
-  background: var(--desk);
-  overflow: hidden;
+  padding: 20px 24px 80px;
 }
 .progress-fill {
   height: 100%;
@@ -1095,30 +1399,7 @@ kbd {
   color: var(--muted);
 }
 .mode-switch {
-  display: inline-flex;
-  gap: 4px;
-  background: var(--desk);
-  padding: 3px;
-  border-radius: 10px;
   margin-bottom: 12px;
-}
-.mode-switch button {
-  border: 0;
-  background: transparent;
-  padding: 5px 14px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-.mode-switch button.active {
-  background: var(--panel);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-  font-weight: 600;
-}
-.hint-line {
-  margin: -4px 0 10px;
-  font-size: 12.5px;
-  color: var(--muted);
-  max-width: 760px;
 }
 .phrase-studio {
   display: flex;
@@ -1162,7 +1443,19 @@ kbd {
   min-width: 220px;
 }
 .phrase-canvas {
+  position: relative;
   width: 100%;
+}
+.canvas-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  opacity: 0.75;
+  pointer-events: none;
 }
 .capture-canvas.marking {
   cursor: ew-resize;
@@ -1177,8 +1470,16 @@ kbd {
   gap: 12px;
   margin-bottom: 10px;
 }
-.workbench-head .btn {
-  font-size: 18px;
+.letter-arrows {
+  display: inline-flex;
+  gap: 2px;
+}
+.letter-arrows .btn {
+  font-size: 17px;
+  padding: 2px 12px;
+}
+.variants.recorded {
+  margin-top: 18px;
 }
 .current-char {
   display: flex;
@@ -1197,7 +1498,7 @@ kbd {
 }
 .capture-canvas {
   background: var(--paper);
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 10px;
   cursor: crosshair;
   touch-action: none;
@@ -1228,8 +1529,9 @@ kbd {
   width: 112px;
   height: 112px;
   background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  box-shadow: var(--float-shadow);
 }
 .sample-thumb svg {
   width: 100%;
@@ -1324,26 +1626,24 @@ line.guide.dashed {
   width: 100%;
   height: 120px;
   background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: var(--float-shadow);
 }
 .join-dot {
   fill: var(--ok);
   opacity: 0.7;
 }
 .panel {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px;
-  background: var(--paper);
+  border-radius: 16px;
+  padding: 14px;
 }
 .panel textarea {
   width: 100%;
   resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 10px;
   padding: 6px 8px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--line) 40%, transparent);
 }
 .phrase {
   font-size: 30px;
@@ -1384,17 +1684,29 @@ line.guide.dashed {
   color: var(--muted);
 }
 
+/* A narrow window: the right column goes under the workbench and the studio scrolls as one. */
 @media (max-width: 1100px) {
   .studio {
-    grid-template-columns: 210px minmax(0, 1fr);
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .alphabet-col {
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: 0;
+    height: calc(100vh - 34px);
+  }
+  .workbench {
+    overflow: visible;
+    padding: 20px 24px 0;
   }
   .side {
-    grid-column: 1 / -1;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-  .doc-list {
-    width: 200px;
+    overflow: visible;
+    padding: 16px 24px 80px;
+    animation: none;
+    mask-image: none;
   }
 }
 
@@ -1412,9 +1724,6 @@ line.guide.dashed {
     overflow: visible;
   }
   .no-print,
-  .topbar,
-  .doc-list,
-  .toolbar,
   .ink-busy,
   .ink-missing,
   .html-block-head {
@@ -1480,8 +1789,7 @@ line.guide.dashed {
   gap: 4px;
   padding: 4px 6px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   box-shadow: var(--shadow);
   font: 12px system-ui, sans-serif;
 }
@@ -1667,22 +1975,7 @@ line.guide.dashed {
   flex-wrap: wrap;
 }
 
-/* ---------- render button and its settings ---------- */
-.btn-group {
-  display: flex;
-  align-items: stretch;
-}
-.btn-group > .btn {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.btn-group > .menu > summary.btn {
-  height: 100%;
-  margin-left: -1px;
-  padding: 6px 10px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
+/* ---------- render settings ---------- */
 .render-menu {
   width: 340px;
   min-width: 0 !important;
@@ -1694,20 +1987,8 @@ line.guide.dashed {
   gap: 14px;
   font-size: 13px;
 }
-.render-menu .panel {
-  border: 0;
-  padding: 0;
-  background: none;
-}
-.render-note {
-  margin: 0;
-}
-.side-hint {
-  margin: 0;
-  padding: 0 4px;
-}
 
-/* ---------- export history (top bar) ---------- */
+/* ---------- export history (top corner) ---------- */
 .exports {
   position: relative;
 }
@@ -1715,17 +1996,22 @@ line.guide.dashed {
   position: relative;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
+  width: 57px;
+  height: 57px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--float);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--float-shadow);
   color: var(--text);
   cursor: pointer;
 }
-.exports-btn.on {
-  border-color: var(--accent);
+.exports-btn:hover {
   color: var(--accent);
+}
+.exports-btn.on {
+  background: var(--accent);
+  color: var(--accent-text);
 }
 .exports-btn.new::after {
   content: '';
@@ -1740,14 +2026,13 @@ line.guide.dashed {
 }
 .exports-panel {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   right: 0;
   z-index: 70;
   width: 360px;
   padding: 10px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow: var(--shadow);
   font-size: 13px;
 }
@@ -1912,14 +2197,13 @@ line.guide.dashed {
 /* ---------- ink rendering progress ---------- */
 .ink-progress {
   position: sticky;
-  top: 64px;
+  top: 0;
   z-index: 10;
   margin: 0 auto 10px;
   width: 360px;
   padding: 8px 12px;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 14px;
   box-shadow: var(--shadow);
   font: 12.5px system-ui, sans-serif;
   display: flex;
@@ -1927,19 +2211,10 @@ line.guide.dashed {
   gap: 6px;
 }
 
-/* ---------- theme switch ---------- */
-.theme-toggle {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 3px 9px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.topbar-right {
-  justify-self: end;
-  display: flex;
+.ink-stale {
+  flex-direction: row;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
 }
 
@@ -1981,8 +2256,7 @@ line.guide.dashed {
   height: min(92vh, 1000px);
   background: var(--panel);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
   font: 14px/1.45 system-ui, sans-serif;
   overflow: hidden;
@@ -2321,11 +2595,6 @@ line.guide.dashed {
 }
 .desk-gallery .doc-delete {
   color: #9aa1b5;
-}
-.check.backup-desks {
-  margin: 4px 2px 0;
-  font-size: 12px;
-  color: var(--muted);
 }
 .desk-list li:hover .doc-delete,
 .desk-gallery li:hover .doc-delete,

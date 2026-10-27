@@ -1,6 +1,6 @@
 import { Extension, InputRule } from '@tiptap/core';
 import { Fragment, Slice, type Mark as PMMark, type Node as PMNode, type Schema } from '@tiptap/pm/model';
-import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
 import { convertMathInText, convertTex, countMathInText, hasTable, splitTables, TYPED_MATH, type MathRun } from './tex';
 
 declare module '@tiptap/core' {
@@ -27,20 +27,18 @@ function formulaBlock(schema: Schema, tex: string): PMNode {
 
 /**
  * A paragraph with formulas holding tables, cut into paragraphs (their other
- * formulas converted) and «Формула» blocks; null when it has none.
+ * formulas converted, indices already written kept) and «Формула» blocks;
+ * null when it has none. A paragraph holds only text, so its text's offsets
+ * are its positions.
  */
 function splitParagraph(schema: Schema, para: PMNode): PMNode[] | null {
   const parts = splitTables(para.textContent);
   if (!parts) return null;
-  const out: PMNode[] = [];
-  for (const p of parts) {
-    if ('tex' in p) out.push(formulaBlock(schema, p.tex));
-    else if (p.text.trim()) {
-      const runs = convertMathInText(p.text.trim()) ?? [{ text: p.text.trim() }];
-      out.push(schema.nodes.paragraph.create(para.attrs, runNodes(schema, runs, [])));
-    }
-  }
-  return out;
+  return parts.map((p) => {
+    if ('tex' in p) return formulaBlock(schema, p.tex);
+    const piece = para.cut(p.from, p.to);
+    return piece.copy(convertFragment(schema, piece.content));
+  });
 }
 
 function convertFragment(schema: Schema, fragment: Fragment): Fragment {
@@ -99,12 +97,26 @@ export const MathText = Extension.create({
       new InputRule({
         find: TYPED_MATH,
         handler: ({ state, range, match }) => {
-          const source = match[1];
+          const source = match[1] ?? match[2];
           const from = range.from + (match[0].length - source.length);
           const $from = state.doc.resolve(from);
           const tex = source.startsWith('$') ? source.slice(1, -1) : source.slice(3, -3);
-          // A table does not fit on a line: «Распознать формулы» makes it a block of its own.
-          if (hasTable(tex)) return null;
+          if (hasTable(tex)) {
+            // A table does not fit on a line: its paragraph is cut around it into a «Формула» block.
+            if ($from.depth !== 1) return null;
+            // The typed character is already in the line.
+            const { tr } = state;
+            const at = $from.before();
+            const para = tr.doc.nodeAt(at)!;
+            const split = splitParagraph(state.schema, para);
+            if (!split) return null;
+            // Go on writing in a line after it.
+            if (split[split.length - 1].type.name !== 'paragraph') split.push(state.schema.nodes.paragraph.create(para.attrs));
+            tr.replaceWith(at, at + para.nodeSize, split);
+            const end = at + split.reduce((n, node) => n + node.nodeSize, 0);
+            tr.setSelection(TextSelection.create(tr.doc, end - 1));
+            return;
+          }
           const runs = convertTex(tex);
           if (runs.length === 0) return null;
           state.tr.replaceWith(from, range.to, runNodes(state.schema, runs, $from.marks()));
@@ -147,8 +159,18 @@ export const MathText = Extension.create({
         key: new PluginKey('mathText'),
         props: {
           transformPastedHTML: mathSourceInHtml,
-          transformPasted: (slice, view) =>
-            new Slice(convertFragment(view.state.schema, slice.content), slice.openStart, slice.openEnd),
+          transformPasted: (slice, view) => {
+            const { schema } = view.state;
+            // Bare text with a table in it (copied from within a line): a line of its own, cut around the table.
+            if (slice.content.firstChild?.isInline) {
+              const split = splitParagraph(schema, schema.nodes.paragraph.create(null, slice.content));
+              if (split) return new Slice(Fragment.fromArray(split), 0, 0);
+            }
+            const content = convertFragment(schema, slice.content);
+            // A line cut into «Формула» blocks cannot stay open to join the line pasted into: it goes in whole.
+            const cut = content.childCount !== slice.content.childCount || content.content.some((n, i) => n.type !== slice.content.child(i).type);
+            return cut ? new Slice(content, 0, 0) : new Slice(content, slice.openStart, slice.openEnd);
+          },
         },
       }),
     ];

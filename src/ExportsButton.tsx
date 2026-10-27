@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { DownloadIcon } from './ui/icons';
 import { useLive } from './util/useLive';
 import {
   clearExportHistory,
@@ -16,16 +17,8 @@ const size = (bytes: number) =>
 const when = (at: number) =>
   new Date(at).toLocaleString('ru-RU', new Date(at).toDateString() === new Date().toDateString() ? { timeStyle: 'short' } : { dateStyle: 'short', timeStyle: 'short' });
 
-function DownloadIcon() {
-  return (
-    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-      <path d="M10 3v9m0 0-3.5-3.5M10 12l3.5-3.5M4 15.5h12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 /**
- * Export history in the top bar, like a browser's downloads button: it shows
+ * Export history in the top corner, like a browser's downloads button: it shows
  * up after the first export, opens by itself when a file is saved, and in the
  * desktop app opens the file or its folder.
  */
@@ -115,6 +108,16 @@ export function ExportsButton() {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The floating top-right corner: the tab's export menu, then the export history. */
+export function TopCorner({ children }: { children?: ReactNode }) {
+  return (
+    <div className="corner-top no-print">
+      {children}
+      <ExportsButton />
     </div>
   );
 }

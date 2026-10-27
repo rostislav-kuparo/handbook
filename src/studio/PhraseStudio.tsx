@@ -343,11 +343,6 @@ export function PhraseStudio({ onDone }: { onDone?: (saved: string[]) => void })
             {LANG_TITLES[l]}
           </button>
         ))}
-        <span className="muted small">
-          {lang === 'math'
-            ? 'Формулы пишутся как есть, каждый знак — отдельной «буквой». Индексы потом получатся из обычных цифр.'
-            : 'Слово и регистр выбираются случайно, чаще — с буквами, у которых ещё меньше 3 вариантов.'}
-        </span>
       </div>
       <div className="phrase-head">
         <label>
@@ -376,11 +371,6 @@ export function PhraseStudio({ onDone }: { onDone?: (saved: string[]) => void })
         <button className="btn small" onClick={() => nextWord()}>
           {lang === 'math' ? 'Другая формула' : 'Другое слово'}
         </button>
-        <span className="muted small">
-          {stage === 'write'
-            ? 'Напишите слово целиком, как обычно — слитно. Прописную в начале тоже можно: так запишется её соединение.'
-            : 'Двигайте границы за нижний кружок, наклоняйте за верхний — так, чтобы каждая буква была своего цвета. Место разреза станет точкой соединения.'}
-        </span>
       </div>
       <div className="phrase-canvas" ref={wrapRef}>
         <canvas
@@ -392,6 +382,11 @@ export function PhraseStudio({ onDone }: { onDone?: (saved: string[]) => void })
           onPointerCancel={onPointerUp}
           aria-label="Лист для слова"
         />
+        {(stage === 'mark' || strokeCount === 0) && (
+          <span className="canvas-hint">
+            {stage === 'write' ? 'Напишите слово целиком, слитно' : 'Нижний кружок двигает границу, верхний наклоняет'}
+          </span>
+        )}
       </div>
       <div className="capture-actions">
         {stage === 'write' ? (

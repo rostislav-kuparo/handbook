@@ -1,19 +1,21 @@
 import { useEffect, useState } from 'react';
 import { Documents } from './editor/Documents';
+import { requestPrint, SHOW_DOC_EVENT } from './editor/docState';
 import { useHandwriting } from './engine/handwriting';
+import { SketchHelp } from './sketch/SketchHelp';
+import { BACKUP_DESKS_KEY, backupEverything, loadHandwriting, newDocument, openJson, saveHandwriting } from './shell/fileActions';
+import { HELP_EVENT, HelpDialog, type HelpId } from './shell/HelpDialogs';
+import { useMenuKeys, type CommandId } from './shell/menu';
+import { TitleBar } from './shell/TitleBar';
 import { getSetting, setSetting } from './storage/db';
-import { ExportsButton } from './ExportsButton';
 import { Studio } from './studio/Studio';
+import { isDesktop } from './util/download';
+import { useLive } from './util/useLive';
 
 type Tab = 'docs' | 'studio';
 type Theme = 'system' | 'light' | 'dark';
 
 const THEME_KEY = 'handbook.theme';
-const THEMES: { id: Theme; label: string }[] = [
-  { id: 'system', label: '◐ Как в системе' },
-  { id: 'light', label: '☀ Светлая' },
-  { id: 'dark', label: '☾ Тёмная' },
-];
 
 function readTheme(): Theme {
   try {
@@ -27,6 +29,15 @@ function readTheme(): Theme {
 function applyTheme(theme: Theme) {
   if (theme === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = theme;
+}
+
+/** The window's own parts (its shadow, Windows dialogs) follow the app's theme (desktop app). */
+async function applyWindowTheme(theme: Theme) {
+  if (!isDesktop()) return;
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow()
+    .setTheme(theme === 'system' ? null : theme)
+    .catch(() => {});
 }
 
 // Before the first render, so the app never flashes in the wrong theme.
@@ -52,28 +63,39 @@ function pinWindow() {
 }
 pinWindow();
 
-/** App theme: system / light / dark (a per-device preference). */
-function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>(readTheme);
-  const next = () => {
-    const t = THEMES[(THEMES.findIndex((x) => x.id === theme) + 1) % THEMES.length].id;
-    setTheme(t);
-    applyTheme(t);
-    try {
-      localStorage.setItem(THEME_KEY, t);
-    } catch {
-      // storage unavailable: the choice lasts for this session
-    }
-  };
-  return (
-    <button className="theme-toggle" onClick={next} title="Тема оформления (клик — следующая)">
-      {THEMES.find((x) => x.id === theme)!.label}
-    </button>
+/**
+ * One panel at a time: opening a menu closes the others; a click outside or
+ * Esc closes it.
+ */
+function oneMenuAtATime() {
+  const openMenus = () => [...document.querySelectorAll<HTMLDetailsElement>('details.menu[open]')];
+  document.addEventListener(
+    'toggle',
+    (e) => {
+      const d = e.target;
+      if (!(d instanceof HTMLDetailsElement) || !d.open || !d.classList.contains('menu')) return;
+      for (const other of openMenus()) if (other !== d && !other.contains(d)) other.open = false;
+    },
+    true,
   );
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      for (const m of openMenus()) if (!m.contains(e.target as Node)) m.open = false;
+    },
+    true,
+  );
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') for (const m of openMenus()) m.open = false;
+  });
 }
+oneMenuAtATime();
 
 export function App() {
   const [tab, setTab] = useState<Tab>('docs');
+  const [theme, setTheme] = useState<Theme>(readTheme);
+  const [help, setHelp] = useState<HelpId | 'sketch' | null>(null);
+  const backupDesks = useLive(() => getSetting(BACKUP_DESKS_KEY, false), [], false);
   const { byChar, building, loaded } = useHandwriting();
 
   useEffect(() => {
@@ -84,30 +106,89 @@ export function App() {
     void setSetting('app.tab', t);
   };
 
+  useEffect(() => {
+    const onShow = () => go('docs');
+    const onHelp = (e: Event) => setHelp((e as CustomEvent<HelpId | 'sketch'>).detail);
+    window.addEventListener(SHOW_DOC_EVENT, onShow);
+    window.addEventListener(HELP_EVENT, onHelp);
+    return () => {
+      window.removeEventListener(SHOW_DOC_EVENT, onShow);
+      window.removeEventListener(HELP_EVENT, onHelp);
+    };
+  }, []);
+
+  useEffect(() => {
+    applyTheme(theme);
+    void applyWindowTheme(theme);
+  }, [theme]);
+  const pickTheme = (t: Theme) => {
+    setTheme(t);
+    try {
+      localStorage.setItem(THEME_KEY, t);
+    } catch {
+      // storage unavailable: the choice lasts for this session
+    }
+  };
+
+  const run = (id: CommandId) => {
+    switch (id) {
+      case 'file.new':
+        return void newDocument();
+      case 'file.open':
+        return void openJson();
+      case 'file.backup':
+        return void backupEverything();
+      case 'file.backupDesks':
+        return void setSetting(BACKUP_DESKS_KEY, !backupDesks);
+      case 'file.saveHandwriting':
+        return void saveHandwriting();
+      case 'file.loadHandwriting':
+        return void loadHandwriting();
+      case 'file.print':
+        go('docs');
+        return requestPrint();
+      case 'app.quit':
+        return void import('@tauri-apps/api/window').then(({ getCurrentWindow }) => getCurrentWindow().close());
+      case 'theme.system':
+      case 'theme.light':
+      case 'theme.dark':
+        return pickTheme(id.slice(6) as Theme);
+      case 'help.letters':
+      case 'help.sketch':
+      case 'help.keys':
+      case 'help.about':
+        return setHelp(id.slice(5) as HelpId | 'sketch');
+    }
+  };
+  const checked = {
+    'file.backupDesks': backupDesks,
+    'theme.system': theme === 'system',
+    'theme.light': theme === 'light',
+    'theme.dark': theme === 'dark',
+  };
+  useMenuKeys(run);
+
   return (
     <div className="app">
-      <header className="topbar no-print">
-        <div className="brand">
-          <img src="/favicon.svg" alt="" width={26} height={26} />
-          Handbook
-        </div>
-        <nav className="tabs" role="tablist">
-          <button role="tab" aria-selected={tab === 'docs'} className={tab === 'docs' ? 'active' : ''} onClick={() => go('docs')}>
-            Документы
-          </button>
-          <button role="tab" aria-selected={tab === 'studio'} className={tab === 'studio' ? 'active' : ''} onClick={() => go('studio')}>
-            Почерк
-          </button>
-        </nav>
-        <div className="topbar-right">
-          <div className="font-status" title="Шрифт собирается из ваших образцов на лету">
-            {!loaded ? 'загрузка…' : building ? <span className="pulse">собираю шрифт…</span> : `букв в почерке: ${byChar.size}`}
-          </div>
-          <ExportsButton />
-          <ThemeToggle />
-        </div>
-      </header>
+      <TitleBar run={run} checked={checked} />
       {tab === 'docs' ? <Documents /> : <Studio />}
+      <nav className="tabs pill float no-print" role="tablist">
+        <button role="tab" aria-selected={tab === 'docs'} className={tab === 'docs' ? 'on' : ''} onClick={() => go('docs')}>
+          Документы
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === 'studio'}
+          className={tab === 'studio' ? 'on' : ''}
+          onClick={() => go('studio')}
+          title={!loaded ? 'Почерк загружается' : building ? 'Собираю шрифт…' : `Букв в почерке: ${byChar.size}`}
+        >
+          Почерк
+          {(!loaded || building) && <span className="tab-busy pulse" aria-label="собираю шрифт" />}
+        </button>
+      </nav>
+      {help === 'sketch' && <SketchHelp onClose={() => setHelp(null)} />}
+      {help && help !== 'sketch' && <HelpDialog which={help} onClose={() => setHelp(null)} />}
     </div>
   );
 }

@@ -1,7 +1,14 @@
+/**
+ * A shelf of the handwriting studio's alphabet: one script in one case, or
+ * all the symbols (they have no case). The pills under the alphabet pick it.
+ */
+export type Shelf = 'cyr-lower' | 'cyr-upper' | 'lat-lower' | 'lat-upper' | 'sym';
+
 export interface CharGroup {
   id: string;
   title: string;
   chars: string[];
+  shelf: Shelf;
 }
 
 const range = (from: string, to: string) =>
@@ -20,16 +27,30 @@ export const SUGGESTED_PAIRS = [
 ];
 
 export const CHAR_GROUPS: CharGroup[] = [
-  { id: 'cyr-lower', title: 'Строчные', chars: cyrLower },
-  { id: 'cyr-upper', title: 'Прописные', chars: cyrUpper },
-  { id: 'ukr', title: 'Українські', chars: ['і', 'ї', 'є', 'І', 'Ї', 'Є'] },
-  { id: 'lat-lower', title: 'Latin a–z', chars: range('a', 'z') },
-  { id: 'lat-upper', title: 'Latin A–Z', chars: range('A', 'Z') },
-  { id: 'pairs', title: 'Пары букв', chars: SUGGESTED_PAIRS },
-  { id: 'digits', title: 'Цифры', chars: range('0', '9') },
-  { id: 'punct', title: 'Знаки', chars: [...'.,!?:;-—«»"()№%+=/'] },
-  { id: 'math', title: 'Формулы', chars: [...'αβγδεθλμπρσφωΔΣΩ×·−±≠≈≤≥<>°′⊥∥∠△√∞∈→'] },
+  { id: 'cyr-lower', title: 'Русские', chars: cyrLower, shelf: 'cyr-lower' },
+  { id: 'ukr-lower', title: 'Українські', chars: ['і', 'ї', 'є'], shelf: 'cyr-lower' },
+  { id: 'pairs', title: 'Пары букв', chars: SUGGESTED_PAIRS, shelf: 'cyr-lower' },
+  { id: 'cyr-upper', title: 'Русские', chars: cyrUpper, shelf: 'cyr-upper' },
+  { id: 'ukr-upper', title: 'Українські', chars: ['І', 'Ї', 'Є'], shelf: 'cyr-upper' },
+  { id: 'lat-lower', title: 'Latin', chars: range('a', 'z'), shelf: 'lat-lower' },
+  { id: 'lat-upper', title: 'Latin', chars: range('A', 'Z'), shelf: 'lat-upper' },
+  { id: 'digits', title: 'Цифры', chars: range('0', '9'), shelf: 'sym' },
+  { id: 'punct', title: 'Знаки', chars: [...'.,!?:;-—«»"()№%+=/'], shelf: 'sym' },
+  { id: 'math', title: 'Формулы', chars: [...'αβγδεθλμπρσφωΔΣΩ×·−±≠≈≤≥<>°′⊥∥∠△√∞∈→'], shelf: 'sym' },
 ];
+
+const isLatin = (key: string) => /\p{Script=Latin}/u.test(key);
+
+/** The shelf a letter, pair or sign is found on. */
+export function shelfOf(key: string): Shelf {
+  const group = CHAR_GROUPS.find((g) => g.chars.includes(key));
+  if (group) return group.shelf;
+  if (isPair(key)) return isLatin(key) ? 'lat-lower' : 'cyr-lower';
+  return 'sym';
+}
+
+/** Own pairs go to their script's lowercase shelf. */
+export const pairShelf = (pair: string): Shelf => (isLatin(pair) ? 'lat-lower' : 'cyr-lower');
 
 /** Lowercase letters that stay within the x-height (no ascender or descender in cursive). */
 const X_HEIGHT_LETTERS = new Set([...'аеёжийклмнопстчшъыьэюяґіїєaceimnorsuvwxz']);

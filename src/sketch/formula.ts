@@ -167,6 +167,82 @@ function pieces(tex: string): string[] {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
+/** An arrow with words over or under it: \xrightarrow[below]{above}, \overset{above}{\to}. */
+interface Arrow {
+  kind: 'arrow';
+  /** 1 right, −1 left, 0 both ways. */
+  dir: 1 | -1 | 0;
+  double: boolean;
+  above: string;
+  below: string;
+}
+
+const ARROWS: Record<string, [Arrow['dir'], boolean]> = {
+  to: [1, false], rightarrow: [1, false], longrightarrow: [1, false], xrightarrow: [1, false],
+  leftarrow: [-1, false], longleftarrow: [-1, false], gets: [-1, false], xleftarrow: [-1, false],
+  leftrightarrow: [0, false], longleftrightarrow: [0, false], xleftrightarrow: [0, false],
+  Rightarrow: [1, true], Longrightarrow: [1, true], implies: [1, true], xRightarrow: [1, true],
+  Leftarrow: [-1, true], Longleftarrow: [-1, true], xLeftarrow: [-1, true],
+  Leftrightarrow: [0, true], Longleftrightarrow: [0, true], iff: [0, true], xLeftrightarrow: [0, true],
+};
+
+/** The argument at i (spaces skipped): a {group}, an [option] (only when asked for) or one token. */
+function argAt(s: string, i: number, open: '{' | '['): { src: string; end: number } | null {
+  while (/\s/.test(s[i] ?? '')) i++;
+  const close = open === '[' ? (s[i] === '[' ? ']' : null) : s[i] === '{' ? '}' : null;
+  if (!close) {
+    if (open === '[' || i >= s.length) return null;
+    const m = /^\\(?:[A-Za-z]+|.)|^./s.exec(s.slice(i))!;
+    return { src: m[0], end: i + m[0].length };
+  }
+  let depth = 0;
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === '{') depth++;
+    else if (c === '}' && depth > 0) depth--;
+    else if (c === close && depth === 0) return { src: s.slice(i + 1, j), end: j + 1 };
+  }
+  return null;
+}
+
+/** Text of a formula with its labelled arrows taken out. */
+function withArrows(tex: string): ({ kind: 'text'; tex: string } | Arrow)[] {
+  const out: ({ kind: 'text'; tex: string } | Arrow)[] = [];
+  const re = /\\(x(?:left|right|leftright|Left|Right|Leftright)arrow|overset|stackrel|underset)(?![A-Za-z])/g;
+  let last = 0;
+  for (let m = re.exec(tex); m; m = re.exec(tex)) {
+    let arrow: Arrow | null = null;
+    let end = 0;
+    if (m[1][0] === 'x') {
+      const below = argAt(tex, re.lastIndex, '[');
+      const above = argAt(tex, below?.end ?? re.lastIndex, '{');
+      if (above) {
+        const [dir, double] = ARROWS[m[1]];
+        arrow = { kind: 'arrow', dir, double, above: above.src, below: below?.src ?? '' };
+        end = above.end;
+      }
+    } else {
+      // \overset{…}{\to}: only over an arrow; over anything else it stays text.
+      const mark = argAt(tex, re.lastIndex, '{');
+      const base = mark && argAt(tex, mark.end, '{');
+      const sym = base && /^\s*\\([A-Za-z]+)\s*$/.exec(base.src);
+      const kind = sym && ARROWS[sym[1]];
+      if (mark && base && kind) {
+        const under = m[1] === 'underset';
+        arrow = { kind: 'arrow', dir: kind[0], double: kind[1], above: under ? '' : mark.src, below: under ? mark.src : '' };
+        end = base.end;
+      }
+    }
+    if (!arrow) continue;
+    if (m.index > last) out.push({ kind: 'text', tex: tex.slice(last, m.index) });
+    out.push(arrow);
+    last = re.lastIndex = end;
+  }
+  if (last < tex.length) out.push({ kind: 'text', tex: tex.slice(last) });
+  return out;
+}
+
 /**
  * How wide written runs are, px at `fs` px per em — a guess before they are
  * written (the hand's own widths are known only then), a little generous.
@@ -236,19 +312,32 @@ export function layoutFormula(tex: string, width: number, fs: number, pen: Pen):
   const colGap = fs * 1.1;
   const gap = fs * 0.45;
   const delimW = fs * 0.5;
+  const small = fs * 0.72;
   const base = hash(tex);
 
   interface Box {
     w: number;
     h: number;
-    part: { kind: 'text'; runs: MathRun[] } | (Table & { cells: MathRun[][][]; colW: number[] });
+    part:
+      | { kind: 'text'; runs: MathRun[] }
+      | (Table & { cells: MathRun[][][]; colW: number[] })
+      | (Arrow & { aboveRuns: MathRun[]; belowRuns: MathRun[] });
   }
   const boxes: Box[] = [];
   for (const p of parse(tex)) {
     if (p.kind === 'text') {
-      for (const piece of pieces(p.tex)) {
-        const runs = convertTex(piece);
-        if (runs.length) boxes.push({ w: guessWidth(runs, fs), h: lineH, part: { kind: 'text', runs } });
+      for (const q of withArrows(p.tex)) {
+        if (q.kind === 'arrow') {
+          const aboveRuns = convertTex(q.above);
+          const belowRuns = convertTex(q.below);
+          const w = Math.max(guessWidth(aboveRuns, small), guessWidth(belowRuns, small), fs * 1.4) + fs * 0.7;
+          boxes.push({ w, h: lineH + (aboveRuns.length || belowRuns.length ? fs * 1.2 : 0), part: { ...q, aboveRuns, belowRuns } });
+          continue;
+        }
+        for (const piece of pieces(q.tex)) {
+          const runs = convertTex(piece);
+          if (runs.length) boxes.push({ w: guessWidth(runs, fs), h: lineH, part: { kind: 'text', runs } });
+        }
       }
     } else {
       const cells = p.rows.map((r) => r.map((c) => convertTex(c)));
@@ -272,13 +361,24 @@ export function layoutFormula(tex: string, width: number, fs: number, pen: Pen):
     bands[bands.length - 1].push(b);
     x += b.w + gap;
   }
+  // Pieces cut at = only to go on over lines: side by side they are written as one text,
+  // or the guessed widths leave holes before the = signs.
+  for (const band of bands) {
+    for (let k = band.length - 1; k > 0; k--) {
+      const a = band[k - 1];
+      const b = band[k];
+      if (a.part.kind !== 'text' || b.part.kind !== 'text') continue;
+      band[k - 1] = { w: a.w + gap + b.w, h: lineH, part: { kind: 'text', runs: [...a.part.runs, { text: ' ' }, ...b.part.runs] } };
+      band.splice(k, 1);
+    }
+  }
 
   const paths: InkPath[] = [];
   const labels: LabelRequest[] = [];
   let top = fs * 0.15;
   let n = 0;
-  const label = (runs: MathRun[], sx: number, sy: number, ax: number) => {
-    labels.push({ runs, size: fs, seed: (base + 7919 * n++) >>> 0, spots: [{ x: sx, y: sy, ax, ay: 0.5 }], fixed: true });
+  const label = (runs: MathRun[], sx: number, sy: number, ax: number, size = fs, ay = 0.5) => {
+    labels.push({ runs, size, seed: (base + 7919 * n++) >>> 0, spots: [{ x: sx, y: sy, ax, ay }], fixed: true });
   };
   bands.forEach((band, bi) => {
     const h = Math.max(...band.map((b) => b.h));
@@ -291,6 +391,20 @@ export function layoutFormula(tex: string, width: number, fs: number, pen: Pen):
         // Text before a table ends right at it; any other starts where it is.
         const next = band[k + 1]?.part.kind === 'table';
         label(p.runs, next ? x + b.w : x, mid, next ? 1 : 0);
+      } else if (p.kind === 'arrow') {
+        const r = rng(base + 53 * k + 977 * bi);
+        const x0 = x + fs * 0.3;
+        const x1 = x + b.w - fs * 0.3;
+        const stroke = (line: Vec[]) => paths.push({ d: outline(wobble(line, r, pen, { straight: true }), r, pen) });
+        for (const dy of p.double ? [-fs * 0.07, fs * 0.07] : [0]) stroke([{ x: x0, y: mid + dy }, { x: x1, y: mid + dy }]);
+        const head = (tip: number, dir: 1 | -1) => {
+          const len = fs * 0.3;
+          for (const s of [-1, 1]) stroke([{ x: tip - dir * len * 0.9, y: mid + s * len * (p.double ? 0.6 : 0.45) }, { x: tip, y: mid }]);
+        };
+        if (p.dir >= 0) head(x1, 1);
+        if (p.dir <= 0) head(x0, -1);
+        if (p.aboveRuns.length) label(p.aboveRuns, x + b.w / 2, mid - fs * 0.2, 0.5, small, 1);
+        if (p.belowRuns.length) label(p.belowRuns, x + b.w / 2, mid + fs * 0.2, 0.5, small, 0);
       } else {
         const y0 = mid - b.h / 2;
         const r = rng(base + 31 * k + 977 * bi);

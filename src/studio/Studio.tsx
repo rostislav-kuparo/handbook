@@ -1,62 +1,64 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { HAND_FONT_STACK } from '../engine/constants';
 import { addSample, deleteSample, updateSample, useHandwriting } from '../engine/handwriting';
-import { CHAR_GROUPS, isLetter, isPair, PANGRAM, SUGGESTED_PAIRS } from '../model/alphabet';
+import { TEX_CHARS } from '../editor/tex';
+import { CHAR_GROUPS, isLetter, isPair, pairShelf, PANGRAM, shelfOf, SUGGESTED_PAIRS, type CharGroup, type Shelf } from '../model/alphabet';
 import { detectAnchors } from '../model/anchors';
+import { BRACKETS, SYMBOL_GROUPS } from '../model/symbols';
 import { Stroke, uid } from '../model/types';
-import { exportHandwriting, getSetting, importHandwriting, setSetting } from '../storage/db';
-import { saveFile } from '../util/download';
+import { getSetting, setSetting } from '../storage/db';
 import { CaptureCanvas } from './CaptureCanvas';
 import { PhraseStudio } from './PhraseStudio';
-import { Progress } from './Progress';
+import { TARGET_VARIANTS } from './phrasePicker';
 import { SampleThumb } from './SampleThumb';
 import { LetterSettings } from './LetterSettings';
 import { SynthPreview } from './SynthPreview';
 
 type Mode = 'letters' | 'phrase';
 
-function Hint({ char }: { char: string }) {
-  if (isPair(char)) {
-    return (
-      <p className="hint-line">
-        Пара пишется <b>одним движением</b>, как в слове: «{char}» целиком, с соединением между буквами. В тексте пара
-        заменит отдельные буквы и даст естественную связку.
-      </p>
-    );
-  }
-  if (isLetter(char) && char !== char.toLowerCase()) {
-    return (
-      <p className="hint-line">
-        Прописная — до линии «прописные». Чтобы она <b>соединялась</b> со следующей буквой, напишите соединяющий штрих{' '}
-        <b>последним</b> и закончите его хвостиком справа у линии строки (или на высоте строчных). Тогда кружок выхода
-        станет зелёным. Г, П, Т, Ф обычно не соединяются — это нормально.
-      </p>
-    );
-  }
-  if (isLetter(char)) {
-    return (
-      <p className="hint-line">
-        Строчная — между «строкой» и «строчными»; хвосты (д, у, р) — до «хвостов». Подводящий штрих от строки слева и
-        хвостик вправо в конце — это точки входа и выхода для слитного письма.
-      </p>
-    );
-  }
-  return null;
+const KNOWN = new Set(CHAR_GROUPS.flatMap((g) => g.chars));
+
+/** Signs the program can insert or has been taught in the text, but the alphabet above doesn't list. */
+function extraSigns(written: Iterable<string>): string[] {
+  const all = [...SYMBOL_GROUPS.flatMap((g) => [...g.chars]), ...TEX_CHARS, ...BRACKETS, ...[...written].filter((k) => !isPair(k))];
+  return [...new Set(all)].filter((c) => !KNOWN.has(c) && c.trim() !== '');
+}
+
+/** How far a group is: a thin bar that fills when every sign has three variants. */
+function GroupProgress({ chars, counts }: { chars: string[]; counts: (ch: string) => number }) {
+  const got = chars.map((ch) => Math.min(counts(ch), TARGET_VARIANTS));
+  const done = got.filter((n) => n >= TARGET_VARIANTS).length;
+  const percent = Math.floor((got.reduce((a, n) => a + n, 0) / (chars.length * TARGET_VARIANTS)) * 100);
+  const missing = chars.filter((_, i) => got[i] < TARGET_VARIANTS);
+  return (
+    <div
+      className="group-progress"
+      title={missing.length ? `Ещё нужны: ${missing.slice(0, 40).join(' ')}${missing.length > 40 ? ' …' : ''}` : `У каждой — минимум ${TARGET_VARIANTS} варианта`}
+    >
+      <div className="group-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+        <div className={`progress-fill ${percent === 100 ? 'full' : ''}`} style={{ width: `${percent}%` }} />
+      </div>
+      <span>
+        {done}/{chars.length}
+      </span>
+    </div>
+  );
 }
 
 export function Studio() {
   const { byChar, style, derived, learned } = useHandwriting();
   const [mode, setMode] = useState<Mode>('letters');
   const [current, setCurrent] = useState('а');
+  const [shelf, setShelf] = useState<Shelf>('cyr-lower');
   const [phrase, setPhrase] = useState(PANGRAM);
   const [newPair, setNewPair] = useState('');
-  const fileRef = useRef<HTMLInputElement>(null);
 
   // Remember the open letter and mode; don't write before the saved ones have been read.
   const [restored, setRestored] = useState(false);
   useEffect(() => {
     void Promise.all([getSetting('studio.char', 'а'), getSetting<Mode>('studio.mode', 'letters')]).then(([ch, m]) => {
       setCurrent(ch);
+      setShelf(shelfOf(ch));
       setMode(m);
       setRestored(true);
     });
@@ -68,14 +70,35 @@ export function Studio() {
     }
   }, [current, mode, restored]);
 
-  // Pairs: the suggested ones plus any the user recorded.
-  const groups = useMemo(() => {
+  // The groups of every shelf: the suggested pairs plus any the user recorded, and the extra signs.
+  const groups = useMemo<CharGroup[]>(() => {
     const ownPairs = [...byChar.keys()].filter((k) => isPair(k) && !SUGGESTED_PAIRS.includes(k));
-    return CHAR_GROUPS.map((g) => (g.id === 'pairs' ? { ...g, chars: [...g.chars, ...ownPairs] } : g));
+    const latinPairs = ownPairs.filter((p) => pairShelf(p) === 'lat-lower');
+    const list = CHAR_GROUPS.map((g) => (g.id === 'pairs' ? { ...g, chars: [...g.chars, ...ownPairs.filter((p) => !latinPairs.includes(p))] } : g));
+    if (latinPairs.length) list.splice(list.findIndex((g) => g.id === 'lat-lower') + 1, 0, { id: 'lat-pairs', title: 'Пары букв', chars: latinPairs, shelf: 'lat-lower' });
+    list.push({ id: 'extra', title: 'Ещё символы', chars: extraSigns(byChar.keys()), shelf: 'sym' });
+    return list;
   }, [byChar]);
-  const visibleChars = useMemo(() => groups.flatMap((g) => g.chars), [groups]);
+  const shown = groups.filter((g) => g.shelf === shelf);
+  const visibleChars = useMemo(() => shown.flatMap((g) => g.chars), [groups, shelf]);
   const variants = byChar.get(current) ?? [];
   const derivedFrom = variants.length === 0 ? derived.get(current) : undefined;
+
+  const open = (ch: string) => {
+    setCurrent(ch);
+    setMode('letters');
+  };
+
+  /** Another shelf: the same letter in the other case when there is one, else the shelf's first. */
+  const pickShelf = (next: Shelf) => {
+    setShelf(next);
+    const chars = groups.filter((g) => g.shelf === next).flatMap((g) => g.chars);
+    if (chars.includes(current)) return;
+    const twin = next.endsWith('upper') ? current.toUpperCase() : current.toLowerCase();
+    open(chars.includes(twin) ? twin : chars[0]);
+  };
+  const script = shelf === 'sym' ? 'sym' : shelf.slice(0, 3);
+  const upper = shelf.endsWith('upper');
 
   const move = useCallback(
     (delta: number) => {
@@ -107,83 +130,91 @@ export function Studio() {
   const addPair = () => {
     const p = newPair.trim().toLowerCase();
     if ([...p].length >= 2 && [...p].length <= 3 && [...p].every(isLetter)) {
-      setCurrent(p);
-      setMode('letters');
+      setShelf(pairShelf(p));
+      open(p);
       setNewPair('');
     }
   };
 
-  const exportBackup = async () => {
-    const data = await exportHandwriting();
-    await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), 'pocherk.handbook.json');
-  };
-
-  const importBackup = async (file: File) => {
-    try {
-      const data = JSON.parse(await file.text());
-      const replace = confirm('Заменить текущий почерк? «Отмена» — добавить образцы к текущим.');
-      await importHandwriting(data, replace);
-    } catch (err) {
-      alert(String(err));
-    }
-  };
-
   const weightKey = `${style.weight}|${style.pressure}`;
+  const lower = script === 'lat' ? 'aa' : 'аа';
 
   return (
     <div className="studio">
-      <aside className="alphabet">
-        {groups.map((g) => (
-          <section key={g.id}>
-            <h4>{g.title}</h4>
-            <div className={`char-grid ${g.id === 'pairs' ? 'pairs' : ''}`}>
-              {g.chars.map((ch) => {
-                const n = byChar.get(ch)?.length ?? 0;
-                const auto = n === 0 && derived.has(ch);
-                return (
-                  <button
-                    key={ch}
-                    className={`char-cell ${ch === current && mode === 'letters' ? 'active' : ''} ${
-                      n === 0 ? (auto ? 'auto' : 'none') : n < 3 ? 'few' : 'ok'
-                    }`}
-                    onClick={() => {
-                      setCurrent(ch);
-                      setMode('letters');
-                    }}
-                    title={auto ? `${ch}: собрана автоматически из «${derived.get(ch)}»` : `${ch}: вариантов ${n}`}
-                  >
-                    <span>{ch}</span>
-                    {n > 0 ? <small>{n}</small> : auto && <small className="auto-mark">авто</small>}
-                  </button>
-                );
-              })}
-            </div>
-            {g.id === 'pairs' && (
-              <div className="row pair-add">
-                <input
-                  value={newPair}
-                  onChange={(e) => setNewPair(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addPair()}
-                  placeholder="своя пара"
-                  maxLength={3}
-                  aria-label="Своя пара букв"
-                />
-                <button className="btn small" onClick={addPair}>
-                  +
-                </button>
-              </div>
-            )}
-          </section>
-        ))}
+      <aside className="alphabet-col">
+        <div className="alphabet float">
+          <div className="alphabet-groups fade-scroll">
+            {shown.map((g) => (
+              <section key={g.id}>
+                <h4>{g.title}</h4>
+                <GroupProgress chars={g.chars} counts={(ch) => byChar.get(ch)?.length ?? 0} />
+                <div className={`char-grid ${g.id.endsWith('pairs') ? 'pairs' : ''}`}>
+                  {g.chars.map((ch) => {
+                    const n = byChar.get(ch)?.length ?? 0;
+                    const auto = n === 0 && derived.has(ch);
+                    return (
+                      <button
+                        key={ch}
+                        className={`char-cell ${ch === current && mode === 'letters' ? 'active' : ''} ${
+                          n === 0 ? (auto ? 'auto' : 'none') : n < 3 ? 'few' : 'ok'
+                        }`}
+                        onClick={() => open(ch)}
+                        title={auto ? `${ch}: собрана автоматически из «${derived.get(ch)}»` : `${ch}: вариантов ${n}`}
+                      >
+                        <span>{ch}</span>
+                        {n > 0 ? <small>{n}</small> : auto && <small className="auto-mark">авто</small>}
+                      </button>
+                    );
+                  })}
+                </div>
+                {g.id === 'pairs' && (
+                  <div className="row pair-add">
+                    <input
+                      value={newPair}
+                      onChange={(e) => setNewPair(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && addPair()}
+                      placeholder="своя пара"
+                      maxLength={3}
+                      aria-label="Своя пара букв"
+                    />
+                    <button className="btn small" onClick={addPair}>
+                      +
+                    </button>
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        </div>
+        <div className="alphabet-pills">
+          <div className="pill float" role="group" aria-label="Регистр">
+            <button className={!upper ? 'on' : ''} disabled={script === 'sym'} onClick={() => pickShelf(`${script}-lower` as Shelf)} title="Строчные">
+              {lower}
+            </button>
+            <button className={upper ? 'on' : ''} disabled={script === 'sym'} onClick={() => pickShelf(`${script}-upper` as Shelf)} title="Прописные">
+              {lower.toUpperCase()}
+            </button>
+          </div>
+          <div className="pill float" role="group" aria-label="Алфавит">
+            <button className={script === 'cyr' ? 'on' : ''} onClick={() => pickShelf(upper ? 'cyr-upper' : 'cyr-lower')} title="Кириллица">
+              Кир
+            </button>
+            <button className={script === 'lat' ? 'on' : ''} onClick={() => pickShelf(upper ? 'lat-upper' : 'lat-lower')} title="Латиница">
+              Lat
+            </button>
+            <button className={script === 'sym' ? 'on' : ''} onClick={() => pickShelf('sym')} title="Цифры, знаки и формулы">
+              ∑
+            </button>
+          </div>
+        </div>
       </aside>
 
       <section className="workbench">
-        <Progress />
-        <div className="mode-switch" role="tablist">
-          <button role="tab" aria-selected={mode === 'letters'} className={mode === 'letters' ? 'active' : ''} onClick={() => setMode('letters')}>
+        <div className="pill mode-switch" role="tablist">
+          <button role="tab" aria-selected={mode === 'letters'} className={mode === 'letters' ? 'on' : ''} onClick={() => setMode('letters')}>
             Буквы и пары
           </button>
-          <button role="tab" aria-selected={mode === 'phrase'} className={mode === 'phrase' ? 'active' : ''} onClick={() => setMode('phrase')}>
+          <button role="tab" aria-selected={mode === 'phrase'} className={mode === 'phrase' ? 'on' : ''} onClick={() => setMode('phrase')}>
             Напиши фразу
           </button>
         </div>
@@ -193,32 +224,36 @@ export function Studio() {
         ) : (
           <>
             <header className="workbench-head">
-              <button className="btn ghost" onClick={() => move(-1)} aria-label="Предыдущая буква">
-                ←
-              </button>
               <div className="current-char">
                 <span className="big">{current}</span>
-                <span className="muted">
-                  вариантов: {variants.length} · пишите сколько угодно — каждый вариант делает почерк живее
+                <span className="muted" title="Записанных вариантов">
+                  · {variants.length}
                 </span>
+                {(learned[current] ?? 0) > 0 && (
+                  <span className="muted small" title="Направлений изменчивости вашего письма, которые выучила модель: новые варианты берутся из этого разброса">
+                    модель: {learned[current]}
+                  </span>
+                )}
               </div>
-              <button className="btn ghost" onClick={() => move(1)} aria-label="Следующая буква">
-                →
-              </button>
             </header>
-            <Hint char={current} />
 
-            <CaptureCanvas char={current} penWidth={style.weight} onSave={save} />
+            <CaptureCanvas
+              char={current}
+              penWidth={style.weight}
+              onSave={save}
+              extra={
+                <span className="letter-arrows">
+                  <button className="btn ghost" onClick={() => move(-1)} aria-label="Предыдущая буква" title="Предыдущая буква (←)">
+                    ←
+                  </button>
+                  <button className="btn ghost" onClick={() => move(1)} aria-label="Следующая буква" title="Следующая буква (→)">
+                    →
+                  </button>
+                </span>
+              }
+            />
 
-            <section className="variants">
-              <h3>Записанные варианты</h3>
-              <p className="muted small">
-                Кружки — точки входа и выхода. Зелёный — буква соединяется с соседней в этой точке (у строки или на высоте
-                строчных). Жёлтый — соединение включено, но точка не на краю буквы, поэтому оно не сработает. Клик
-                переключает, а если точка встала не туда — перетащите кружок: он встанет на ближайший конец штриха.
-                В редакторе вариант без входа ставится в начало слова, с входом и выходом — в середину; в «Отрендерить»
-                в середине слова бывают все варианты, а соединение к букве без входа дорисовывается само.
-              </p>
+            <section className="variants recorded">
               <div className="thumbs">
                 {variants.map((s) => (
                   <SampleThumb
@@ -229,11 +264,9 @@ export function Studio() {
                     onAnchor={(side, anchor) => void updateSample(s.id, { [side]: anchor })}
                   />
                 ))}
-                {variants.length === 0 && (
-                  <p className="muted">
-                    {derivedFrom
-                      ? `Пока буква собрана автоматически (${derivedFrom === 'перо' ? 'нарисована вашим пером' : `из «${derivedFrom}»`}). Напишите свою — она заменит автоматическую.`
-                      : 'Пока пусто.'}
+                {variants.length === 0 && derivedFrom && (
+                  <p className="muted small">
+                    Сейчас собрана автоматически {derivedFrom === 'перо' ? '(вашим пером)' : `из «${derivedFrom}»`}. Своя заменит её.
                   </p>
                 )}
               </div>
@@ -242,19 +275,13 @@ export function Studio() {
             <section className="variants">
               <h3>Так движок пишет {isPair(current) ? 'эту пару' : 'эту букву'}</h3>
               <SynthPreview char={current} />
-              {(learned[current] ?? 0) > 0 && (
-                <p className="muted small">
-                  Модель выучила направлений изменчивости вашего письма: {learned[current]}. Новые варианты берутся из этого
-                  разброса.
-                </p>
-              )}
             </section>
           </>
         )}
       </section>
 
-      <aside className="side">
-        <section className="panel">
+      <aside className="side fade-scroll">
+        <section className="panel float">
           <h3>Проба пера</h3>
           <textarea value={phrase} onChange={(e) => setPhrase(e.target.value)} rows={2} />
           <p className="phrase" style={{ fontFamily: HAND_FONT_STACK }}>
@@ -262,28 +289,6 @@ export function Studio() {
           </p>
         </section>
         <LetterSettings />
-        <section className="panel">
-          <h3>Резервная копия</h3>
-          <div className="row">
-            <button className="btn small" onClick={exportBackup}>
-              Сохранить почерк
-            </button>
-            <button className="btn small" onClick={() => fileRef.current?.click()}>
-              Загрузить…
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".json,application/json"
-              hidden
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void importBackup(f);
-                e.target.value = '';
-              }}
-            />
-          </div>
-        </section>
       </aside>
     </div>
   );

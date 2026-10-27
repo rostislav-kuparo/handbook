@@ -1,7 +1,7 @@
 {
   "name": "handbook",
   "private": true,
-  "version": "0.4.5",
+  "version": "0.5.3",
   "type": "module",
   "description": "Handwriting text editor: your own handwriting as a living font, with embedded HTML blocks",
   "scripts": {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 import { isPair } from '../model/alphabet';
 import { InkPoint, Stroke } from '../model/types';
 import { CELL, drawGuides, drawStroke, prepareCanvas, themeColors } from './inkDraw';
@@ -20,9 +20,11 @@ interface Props {
   /** Bind Enter / Esc / Ctrl+Z on the window. */
   hotkeys?: boolean;
   handle?: Ref<CaptureHandle>;
+  /** More buttons at the end of the row (the studio's previous / next letter). */
+  extra?: ReactNode;
 }
 
-export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = true, handle }: Props) {
+export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = true, handle, extra }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef<Stroke[]>([]);
@@ -186,6 +188,7 @@ export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = 
         <button className="btn ghost" onClick={clear} disabled={strokeCount === 0}>
           Очистить {hotkeys && <kbd>Esc</kbd>}
         </button>
+        {extra}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 // Runs the Rust engine off the main thread so font rebuilds never block typing.
 import init, { Engine } from '../../crates/glyph-core/pkg/glyph_core.js';
+import type { CharStyles } from './client';
 import { FONT_FAMILY } from './constants';
 
 let engine: Engine;
@@ -23,7 +24,7 @@ export type EngineOp =
       lineHeight: number;
       seed: number;
       fallbackWidths: Record<string, number>;
-      charStyles: { scales: number[]; colors: number[]; shifts?: number[]; seen?: Record<string, number>; skeleton?: boolean };
+      charStyles: CharStyles;
     };
 
 self.onmessage = async (e: MessageEvent<{ id: number; req: EngineOp }>) => {

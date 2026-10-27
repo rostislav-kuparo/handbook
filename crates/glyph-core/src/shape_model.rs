@@ -35,6 +35,8 @@ struct GroupModel {
     exit: bool,
     /// The written variants as vectors: new ones start from one of them.
     rows: Vec<Vec<f64>>,
+    /// Which sample (index into the samples the model was fitted to) each row is.
+    members: Vec<usize>,
     /// (standard deviation, unit direction)
     comps: Vec<(f64, Vec<f64>)>,
 }
@@ -57,12 +59,12 @@ pub type Generated = (Vec<Stroke>, Option<Anchor>, Option<Anchor>);
 
 impl ShapeModel {
     pub fn fit(samples: &[Prepared]) -> ShapeModel {
-        let mut by_topo: Vec<(Topology, Vec<&Prepared>)> = Vec::new();
-        for s in samples.iter().filter(|s| !s.strokes.is_empty() && s.strokes.iter().all(|st| !st.is_empty())) {
+        let mut by_topo: Vec<(Topology, Vec<(usize, &Prepared)>)> = Vec::new();
+        for (i, s) in samples.iter().enumerate().filter(|(_, s)| !s.strokes.is_empty() && s.strokes.iter().all(|st| !st.is_empty())) {
             let t = s.topology();
             match by_topo.iter_mut().find(|(k, _)| *k == t) {
-                Some((_, v)) => v.push(s),
-                None => by_topo.push((t, vec![s])),
+                Some((_, v)) => v.push((i, s)),
+                None => by_topo.push((t, vec![(i, s)])),
             }
         }
         ShapeModel { groups: by_topo.into_iter().map(|(_, members)| fit_group(&members)).collect() }
@@ -81,6 +83,7 @@ impl ShapeModel {
 
     /// Draw a new variant from the groups whose way of writing matches `accept`
     /// (e.g. only variants that join on the left, for the middle of a word).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sample_where(&self, rng: &mut Rng, fantasy: f64, accept: impl Fn(&Topology) -> bool) -> Option<Generated> {
         let groups: Vec<&GroupModel> = self.groups.iter().filter(|g| accept(&g.topology)).collect();
         let total: usize = groups.iter().map(|g| g.size).sum();
@@ -96,26 +99,41 @@ impl ShapeModel {
                 false
             }
         })?;
-        let base = &g.rows[rng.below(g.rows.len())];
-        let written = devectorize(base, &g.counts, g.entry, g.exit);
+        let row = rng.below(g.rows.len());
+        Some(g.around(row, rng, fantasy))
+    }
+
+    /// A new variant grown around written variant `index` (of the samples the
+    /// model was fitted to); None when that sample is not in the model.
+    pub fn sample_near(&self, index: usize, rng: &mut Rng, fantasy: f64) -> Option<Generated> {
+        self.groups.iter().find_map(|g| g.members.iter().position(|&m| m == index).map(|row| g.around(row, rng, fantasy)))
+    }
+}
+
+impl GroupModel {
+    /// A sibling of written variant `row`, or the variant itself when no
+    /// plausible one turns up.
+    fn around(&self, row: usize, rng: &mut Rng, fantasy: f64) -> Generated {
+        let base = &self.rows[row];
+        let written = devectorize(base, &self.counts, self.entry, self.exit);
         let spread = fantasy.clamp(0.0, 3.0) * SPREAD;
-        if g.comps.is_empty() || spread <= 0.0 {
-            return Some(written);
+        if self.comps.is_empty() || spread <= 0.0 {
+            return written;
         }
         for _ in 0..3 {
             let mut v = base.clone();
-            for (sigma, u) in &g.comps {
+            for (sigma, u) in &self.comps {
                 let z = rng.gauss() * spread;
                 for (vi, ui) in v.iter_mut().zip(u) {
                     *vi += sigma * z * ui;
                 }
             }
-            let fresh = devectorize(&v, &g.counts, g.entry, g.exit);
+            let fresh = devectorize(&v, &self.counts, self.entry, self.exit);
             if plausible(&fresh.0, &written.0) {
-                return Some(fresh);
+                return fresh;
             }
         }
-        Some(written)
+        written
     }
 }
 
@@ -217,7 +235,8 @@ fn devectorize(v: &[f64], counts: &[usize], entry: bool, exit: bool) -> Generate
     (strokes, entry, exit)
 }
 
-fn fit_group(members: &[&Prepared]) -> GroupModel {
+fn fit_group(indexed: &[(usize, &Prepared)]) -> GroupModel {
+    let members: Vec<&Prepared> = indexed.iter().map(|(_, p)| *p).collect();
     let first = members[0];
     let reference = aligned(first).0;
     let counts: Vec<usize> = (0..first.strokes.len())
@@ -268,6 +287,7 @@ fn fit_group(members: &[&Prepared]) -> GroupModel {
         entry: first.topology().entry.is_some(),
         exit: first.topology().exit.is_some(),
         rows,
+        members: indexed.iter().map(|(i, _)| *i).collect(),
         comps,
     }
 }
