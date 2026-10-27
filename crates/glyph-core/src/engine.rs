@@ -86,6 +86,18 @@ pub struct ColorPath {
     pub d: String,
 }
 
+/// Centre lines of strokes with pen radius and pressure: (x, y, r, p) per point.
+type Skeleton = Vec<Vec<[f64; 4]>>;
+
+/// One stroke's centre line, as drawn on a line of the paragraph: flat
+/// `x, y, r, p` per point (same coordinates as the outlines; `p` is pressure,
+/// 1 at the letter's median, 0.3..1.5).
+#[derive(Serialize, Clone)]
+pub struct SkelStroke {
+    pub color: u8,
+    pub pts: Vec<f64>,
+}
+
 /// Per-character size, colour and raise of a paragraph (empty = default for all).
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -100,6 +112,9 @@ pub struct CharStyles {
     /// the document, so a «1.» or «і» repeated in every paragraph still
     /// gets a different instance each time.
     pub seen: HashMap<String, u64>,
+    /// Also return the strokes' centre lines with pressure (`lineSkel`), for
+    /// drawing the ink like a real pen onto a photo.
+    pub skeleton: bool,
 }
 
 /// Size, colour index and raise (font units, up) of one character.
@@ -125,6 +140,9 @@ pub struct ParagraphRender {
     pub d: String,
     /// The same ink split per line and colour (same coordinates), so lines can flow onto pages.
     pub line_d: Vec<Vec<ColorPath>>,
+    /// Centre lines per line, when asked for (`CharStyles::skeleton`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub line_skel: Vec<Vec<SkelStroke>>,
     pub missing: Vec<String>,
     /// Characters without samples, to be drawn with a fallback font (y down, on the baseline).
     pub fallback: Vec<FallbackChar>,
@@ -304,31 +322,33 @@ impl EngineCore {
         }
     }
 
-    fn finish(&self, ink: &GlyphInk) -> (Vec<Vec<[f64; 2]>>, Placement) {
-        let discs = outline::discs(ink, &self.style);
+    fn finish(&self, ink: &GlyphInk) -> (Vec<Vec<[f64; 2]>>, Placement, Skeleton) {
+        let skel = outline::skeleton(ink, &self.style);
+        let discs = outline::discs_of(&skel);
         let bbox = outline::ink_bbox(&discs);
         let polys = outline::polygons(&discs);
-        (polys, synth::place(ink, &bbox, &self.style))
+        (polys, synth::place(ink, &bbox, &self.style), skel)
     }
 
     /// Outline, placement and kerning profile of a letter at a size factor
     /// (scaled around its origin on the baseline).
-    fn placed(&self, ink: &GlyphInk, scale: f64) -> (Vec<Vec<[f64; 2]>>, Placement, Profile) {
-        let (mut polys, mut pl) = self.finish(ink);
+    fn placed(&self, ink: &GlyphInk, scale: f64) -> (Vec<Vec<[f64; 2]>>, Placement, Profile, Skeleton) {
+        let (mut polys, mut pl, mut skel) = self.finish(ink);
         if (scale - 1.0).abs() > 1e-6 {
             for c in polys.iter_mut() {
                 for p in c.iter_mut() {
                     *p = [pl.origin_x + (p[0] - pl.origin_x) * scale, p[1] * scale];
                 }
             }
+            scale_skeleton(&mut skel, pl.origin_x, scale);
             pl.advance *= scale;
         }
         let profile = Profile::of(&polys, -pl.origin_x);
-        (polys, pl, profile)
+        (polys, pl, profile, skel)
     }
 
     fn font_glyph(&self, ink: &GlyphInk) -> FontGlyph {
-        let (polys, pl) = self.finish(ink);
+        let (polys, pl, _) = self.finish(ink);
         FontGlyph {
             contours: round_contours(&polys, -pl.origin_x),
             advance: pl.advance.round().clamp(1.0, 4000.0) as u16,
@@ -436,7 +456,7 @@ impl EngineCore {
             .map(|i| {
                 let mut rng = Rng::new(mix(mix(self.key_seed(key), seed as u64), i as u64));
                 let ink = synth::synthesize(&data.prepared, &data.model, None, Position::Any, &mut rng, &self.style, &self.joins, true);
-                let (polys, pl) = self.finish(&ink);
+                let (polys, pl, _) = self.finish(&ink);
                 let mut d = String::new();
                 outline::svg_path(&polys, -pl.origin_x, 0.0, true, &mut d);
                 PreviewGlyph {
@@ -551,6 +571,7 @@ impl EngineCore {
         let top = ASCENDER as f64;
         let j = style.jitter;
         let mut line_d: Vec<Vec<ColorPath>> = vec![vec![]; lines.len()];
+        let mut line_skel: Vec<Vec<SkelStroke>> = if styles.skeleton { vec![vec![]; lines.len()] } else { vec![] };
         let mut fallback = Vec::new();
         let mut max_baseline = top;
         for (li, line) in lines.iter().enumerate() {
@@ -588,6 +609,9 @@ impl EngineCore {
                         }
                     };
                     outline::svg_path(&item.polys, gx - item.origin, y, true, &mut parts[at].d);
+                    if let Some(out) = line_skel.get_mut(li) {
+                        out.extend(item.skel.iter().map(|s| SkelStroke { color: item.color, pts: skeleton_points(s, gx - item.origin, y) }));
+                    }
                 }
             }
         }
@@ -598,6 +622,7 @@ impl EngineCore {
             lines: n_lines,
             d: line_d.iter().flatten().map(|p| p.d.as_str()).collect(),
             line_d,
+            line_skel,
             missing,
             fallback,
         }
@@ -614,15 +639,15 @@ impl EngineCore {
             }
         }
         let joined = prev_exit.is_some() && ink.entry.is_some();
-        let (mut polys, mut pl, mut profile) = self.placed(ink, scale);
+        let (mut polys, mut pl, mut profile, mut skel) = self.placed(ink, scale);
         if let (true, Some((pp, padv)), Some(e)) = (joined, prev_profile, ink.entry) {
             let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
             let need = joined_overlap(&right_rel, &profile.left, e.y * scale, style.weight + 70.0, (style.weight * 0.4).max(8.0));
             if need > 6.0 && stretch_entry(ink, (need / scale).min(400.0)) {
-                (polys, pl, profile) = self.placed(ink, scale);
+                (polys, pl, profile, skel) = self.placed(ink, scale);
             }
         }
-        Placed { polys, origin: pl.origin_x, advance: pl.advance, profile, joined, exit: None }
+        Placed { polys, skel, origin: pl.origin_x, advance: pl.advance, profile, joined, exit: None }
     }
 
     /// A letter as it was written, joined to the previous one by the stroke a
@@ -699,7 +724,8 @@ impl EngineCore {
             }
             _ => f64::NAN,
         };
-        let discs = outline::discs(ink, style);
+        let mut skel = outline::skeleton(ink, style);
+        let discs = outline::discs_of(&skel);
         let bbox = outline::ink_bbox(&discs);
         let mut polys = outline::polygons(&discs);
         let origin = if origin.is_nan() { synth::place(ink, &bbox, style).origin_x } else { origin };
@@ -714,6 +740,7 @@ impl EngineCore {
                     *q = [origin + (q[0] - origin) * scale, q[1] * scale];
                 }
             }
+            scale_skeleton(&mut skel, origin, scale);
         }
         let advance = ((right - origin) * scale).max(20.0);
         let profile = Profile::of(&polys, -origin);
@@ -723,7 +750,7 @@ impl EngineCore {
             let q = if at { s[0] } else { s[s.len() - 1] };
             Exit { y: q.y * scale, dir: synth::outward(s, at), p: q.p, scale, shift: 0.0 }
         });
-        Placed { polys, origin, advance, profile, joined, exit }
+        Placed { polys, skel, origin, advance, profile, joined, exit }
     }
 
     /// Letters of one word: pairs where recorded, joins adapted to the
@@ -807,7 +834,7 @@ impl EngineCore {
                     prev_exit = ink.exit.map(|j| j.level);
                     prev_join = placed.exit.map(|e| Exit { scale, shift, ..e });
                     prev_profile = Some((placed.profile, placed.advance));
-                    out.push(Item { polys: placed.polys, origin: placed.origin, advance: placed.advance, fallback: None, pos, scale, color, shift });
+                    out.push(Item { polys: placed.polys, skel: placed.skel, origin: placed.origin, advance: placed.advance, fallback: None, pos, scale, color, shift });
                 }
                 None => {
                     let s = key.clone();
@@ -823,7 +850,7 @@ impl EngineCore {
                     prev_exit = None;
                     prev_join = None;
                     prev_profile = None;
-                    out.push(Item { polys: vec![], origin: 0.0, advance, fallback: Some(s), pos, scale, color, shift });
+                    out.push(Item { polys: vec![], skel: vec![], origin: 0.0, advance, fallback: Some(s), pos, scale, color, shift });
                 }
             }
             i += take;
@@ -857,6 +884,7 @@ struct Exit {
 /// whether it joined the previous letter, and where it leaves to the next.
 struct Placed {
     polys: Vec<Vec<[f64; 2]>>,
+    skel: Skeleton,
     origin: f64,
     advance: f64,
     profile: Profile,
@@ -867,6 +895,8 @@ struct Placed {
 /// One placed letter (or pair) of the ink renderer.
 struct Item {
     polys: Vec<Vec<[f64; 2]>>,
+    /// The same letter's centre lines (font units, y up, like `polys`).
+    skel: Skeleton,
     origin: f64,
     advance: f64,
     fallback: Option<String>,
@@ -876,6 +906,29 @@ struct Item {
     color: u8,
     /// Raise above the baseline in font units (indices).
     shift: f64,
+}
+
+/// Scales centre lines around `origin` on the baseline, with their pen radius.
+fn scale_skeleton(skel: &mut Skeleton, origin: f64, scale: f64) {
+    for q in skel.iter_mut().flatten() {
+        *q = [origin + (q[0] - origin) * scale, q[1] * scale, q[2] * scale, q[3]];
+    }
+}
+
+/// A centre line moved like the outlines (`svg_path` with flip) and thinned to
+/// a point every ~30 font units (strokes are resampled every 5), rounded for JSON.
+fn skeleton_points(s: &[[f64; 4]], dx: f64, dy: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut last: Option<[f64; 2]> = None;
+    for (i, q) in s.iter().enumerate() {
+        let p = [q[0] + dx, -q[1] + dy];
+        let far = last.is_none_or(|l| (p[0] - l[0]).hypot(p[1] - l[1]) >= 30.0);
+        if far || i + 1 == s.len() {
+            out.extend([(p[0] * 10.0).round() / 10.0, (p[1] * 10.0).round() / 10.0, (q[2] * 10.0).round() / 10.0, (q[3] * 100.0).round() / 100.0]);
+            last = Some(p);
+        }
+    }
+    out
 }
 
 /// Letter `i` of a word is part of an abbreviation: capitals next to capitals
@@ -1033,6 +1086,30 @@ mod tests {
         let b = e.word_items(&chars, seed, &HashMap::new(), &mut vec![], &[]);
         assert_eq!(a.len(), 4);
         assert!(a.iter().zip(&b).all(|(x, y)| x.polys == y.polys && x.advance == y.advance));
+    }
+
+    #[test]
+    fn centre_lines_follow_the_ink() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true), wave_sample("2", "а", 200.0, true)]);
+        let plain = e.render_paragraph("мама мама", 9000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        assert!(plain.line_skel.is_empty(), "only when asked for");
+        let styles = CharStyles { skeleton: true, ..Default::default() };
+        let r = e.render_paragraph("мама мама", 9000.0, 1500.0, 1, &HashMap::new(), &styles);
+        assert_eq!(r.d, plain.d, "asking for centre lines does not change the ink");
+        assert_eq!(r.line_skel.len(), r.lines);
+        // Every centre point lies within the outline's bounding box.
+        let nums: Vec<f64> = r.d.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).filter_map(|t| t.parse().ok()).collect();
+        let xs: Vec<f64> = nums.iter().step_by(2).copied().collect();
+        let ys: Vec<f64> = nums.iter().skip(1).step_by(2).copied().collect();
+        let (x0, x1) = (xs.iter().cloned().fold(f64::INFINITY, f64::min), xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+        let (y0, y1) = (ys.iter().cloned().fold(f64::INFINITY, f64::min), ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+        let pts: Vec<&[f64]> = r.line_skel[0].iter().flat_map(|s| s.pts.chunks(4)).collect();
+        assert!(pts.len() > 20, "{} points", pts.len());
+        for p in pts {
+            assert!(p[0] >= x0 - 1.0 && p[0] <= x1 + 1.0 && p[1] >= y0 - 1.0 && p[1] <= y1 + 1.0, "{p:?} outside {x0}..{x1} x {y0}..{y1}");
+            assert!((0.3..=1.5).contains(&p[3]) && p[2] > 0.0);
+        }
     }
 
     #[test]

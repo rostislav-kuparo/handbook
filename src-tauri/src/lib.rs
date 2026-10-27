@@ -4,7 +4,7 @@ use tauri::Manager;
 
 /// File types the app exports. Only these are saved, opened or shown, so a
 /// page script can never use the commands to run a program.
-const EXPORT_TYPES: &[&str] = &["png", "svg", "ttf", "json", "pdf"];
+const EXPORT_TYPES: &[&str] = &["png", "jpg", "jpeg", "svg", "ttf", "json", "pdf"];
 
 fn has_export_type(path: &Path) -> bool {
   path
@@ -162,6 +162,8 @@ mod tests {
   fn only_export_types_are_allowed() {
     assert!(has_export_type(Path::new("a.PNG")));
     assert!(has_export_type(Path::new("doc.handbook.json")));
+    assert!(has_export_type(Path::new("Конспект — лист 2 (фото).jpg")));
+    assert!(has_export_type(Path::new("desk.JPEG")));
     assert!(!has_export_type(Path::new("setup.exe")));
     assert!(!has_export_type(Path::new("noext")));
   }

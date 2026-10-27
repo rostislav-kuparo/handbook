@@ -196,6 +196,12 @@ export function sketchHeight(scene: Scene, width: number, fs: number): number {
   return frameOf(scene, width, fs).height;
 }
 
+/** Where the drawing `width` px wide puts the origin (px from its top-left), how wide its plot is, and px per unit along x and y. */
+export function sketchScale(scene: Scene, width: number, fs: number): { height: number; plotW: number; ox: number; oy: number; ppx: number; ppy: number } {
+  const fr = frameOf(scene, width, fs);
+  return { height: fr.height, plotW: fr.rect.x1 - fr.rect.x0, ox: fr.rect.x0 - fr.x[0] * fr.ppx, oy: fr.rect.y1 + fr.y[0] * fr.ppy, ppx: fr.ppx, ppy: fr.ppy };
+}
+
 function niceStep(span: number, count: number): number {
   const raw = span / Math.max(1, count);
   const p = Math.pow(10, Math.floor(Math.log10(raw)));

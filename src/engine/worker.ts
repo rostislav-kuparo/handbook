@@ -23,7 +23,7 @@ export type EngineOp =
       lineHeight: number;
       seed: number;
       fallbackWidths: Record<string, number>;
-      charStyles: { scales: number[]; colors: number[]; shifts?: number[] };
+      charStyles: { scales: number[]; colors: number[]; shifts?: number[]; seen?: Record<string, number>; skeleton?: boolean };
     };
 
 self.onmessage = async (e: MessageEvent<{ id: number; req: EngineOp }>) => {

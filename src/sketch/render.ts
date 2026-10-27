@@ -5,7 +5,7 @@ import { FALLBACK_FONTS } from '../engine/constants';
 import type { Style } from '../model/types';
 import { compileSketch } from './evaluate';
 import { labelInk } from './labels';
-import { layoutSketch, placeLabels, sketchHeight, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
+import { layoutSketch, placeLabels, sketchHeight, sketchScale, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
 import type { Pen } from './pen';
 
 export interface Drawing {
@@ -62,6 +62,11 @@ export function sketchLayout(code: string, width: number, fontSize: number, pen:
 /** Height in px at this width: known before anything is drawn, so pages can be laid out. */
 export function heightOf(code: string, width: number, fontSize: number): number {
   return sketchHeight(compileSketch(code), width, fontSize);
+}
+
+/** Where a drawing `width` px wide puts its origin, and px per unit along x and y. */
+export function scaleOf(code: string, width: number, fontSize: number) {
+  return sketchScale(compileSketch(code), width, fontSize);
 }
 
 /** Lines only: shown at once while the labels are being written. */

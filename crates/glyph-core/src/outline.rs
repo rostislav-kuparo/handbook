@@ -20,6 +20,17 @@ type Disc = (f64, f64, f64);
 /// Pen radius along each stroke. Pressure is normalised by the glyph median so
 /// pens and mice produce the same overall weight.
 pub fn discs(ink: &GlyphInk, style: &Style) -> Vec<Vec<Disc>> {
+    discs_of(&skeleton(ink, style))
+}
+
+/// The pen discs of a skeleton (pressure dropped).
+pub fn discs_of(skel: &[Vec<[f64; 4]>]) -> Vec<Vec<Disc>> {
+    skel.iter().map(|s| s.iter().map(|q| (q[0], q[1], q[2])).collect()).collect()
+}
+
+/// The centre lines with what the pen did there: (x, y, radius, pressure),
+/// pressure normalised to 1 at the glyph's median (0.3..1.5).
+pub fn skeleton(ink: &GlyphInk, style: &Style) -> Vec<Vec<[f64; 4]>> {
     let mut ps: Vec<f64> = ink.strokes.iter().flatten().map(|p| p.p).collect();
     if ps.is_empty() {
         return vec![];
@@ -34,7 +45,7 @@ pub fn discs(ink: &GlyphInk, style: &Style) -> Vec<Vec<Disc>> {
             s.iter()
                 .map(|p| {
                     let pn = (p.p / med).clamp(0.3, 1.5);
-                    (p.x, p.y, (half * (1.0 - k + k * pn)).max(1.5))
+                    [p.x, p.y, (half * (1.0 - k + k * pn)).max(1.5), pn]
                 })
                 .collect()
         })

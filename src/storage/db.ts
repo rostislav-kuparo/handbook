@@ -1,5 +1,6 @@
 // Local-first storage in IndexedDB. Nothing leaves the machine.
 import Dexie, { type EntityTable } from 'dexie';
+import type { SavedDesk } from '../desk/desks';
 import { DEFAULT_STYLE, DocContent, HandDocument, Sample, Style, uid } from '../model/types';
 
 interface SettingRow {
@@ -11,6 +12,8 @@ class HandbookDB extends Dexie {
   samples!: EntityTable<Sample, 'id'>;
   documents!: EntityTable<HandDocument, 'id'>;
   settings!: EntityTable<SettingRow, 'key'>;
+  /** «Мои столы»: photos of desks with their markup (export onto a photo). */
+  desks!: EntityTable<SavedDesk, 'id'>;
 
   constructor() {
     super('handbook');
@@ -19,6 +22,7 @@ class HandbookDB extends Dexie {
       documents: 'id, updatedAt',
       settings: 'key',
     });
+    this.version(2).stores({ desks: 'id, updatedAt' });
   }
 }
 
@@ -83,9 +87,11 @@ export interface FullBackup {
   samples: Sample[];
   documents: HandDocument[];
   settings: SettingRow[];
+  /** «Мои столы», when asked for (photos make the file large). */
+  desks?: unknown[];
 }
 
-export async function exportEverything(): Promise<FullBackup> {
+export async function exportEverything(desks?: unknown[]): Promise<FullBackup> {
   return {
     format: 'handbook-backup',
     version: 1,
@@ -93,6 +99,7 @@ export async function exportEverything(): Promise<FullBackup> {
     samples: await db.samples.toArray(),
     documents: await db.documents.toArray(),
     settings: await db.settings.toArray(),
+    ...(desks ? { desks } : {}),
   };
 }
 

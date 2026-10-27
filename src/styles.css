@@ -1962,3 +1962,374 @@ line.guide.dashed {
     print-color-adjust: exact;
   }
 }
+
+/* ---------- export onto a photo of a desk ---------- */
+.desk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(20, 22, 30, 0.5);
+}
+.desk-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(1320px, 100%);
+  height: min(92vh, 1000px);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  font: 14px/1.45 system-ui, sans-serif;
+  overflow: hidden;
+}
+.desk-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.desk-top h2 {
+  margin: 0;
+  font-size: 17px;
+}
+.desk-steps {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.desk-steps button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.desk-steps button.on {
+  color: var(--text);
+  background: var(--desk);
+}
+.desk-steps button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.desk-step-n {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+}
+.desk-steps button.on .desk-step-n {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.desk-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  flex: 1;
+  min-height: 0;
+}
+.desk-main {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  background: #1c1e24;
+}
+.desk-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+/* The panel scrolls; nothing in it is squeezed. */
+.desk-side > * {
+  flex-shrink: 0;
+}
+.desk-side h3 {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+.desk-side p {
+  margin: 0;
+}
+.desk-side .segmented button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 12.5px;
+}
+.desk-mm {
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+.desk-next {
+  margin-top: 8px;
+}
+.desk-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red);
+  font-size: 12.5px;
+}
+.desk-hint {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  font-size: 12.5px;
+}
+.desk-drop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 18px;
+  padding: 24px;
+  border: 2px dashed #4a4f5c;
+  border-radius: 14px;
+  color: #dfe3ee;
+  text-align: center;
+}
+.desk-drop.over {
+  border-color: var(--accent);
+  background: rgba(142, 164, 255, 0.08);
+}
+.desk-drop .muted {
+  color: #9aa1b5;
+  max-width: 420px;
+}
+.desk-drop .link-btn {
+  color: #b9c2dc;
+}
+.desk-drop-title {
+  margin: 0;
+  font-size: 16px;
+}
+.desk-corners {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.desk-corners canvas {
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+.desk-result {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+}
+.desk-result canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.desk-result.actual {
+  display: block;
+  overflow: auto;
+  padding: 0;
+}
+.desk-result[hidden] {
+  display: none;
+}
+.desk-result.actual canvas {
+  object-fit: fill;
+}
+.desk-busy {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(20, 22, 30, 0.82);
+  color: #fff;
+  font-size: 12.5px;
+  pointer-events: none;
+}
+.desk-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.desk-row .btn {
+  flex: 1;
+}
+.desk-size label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.desk-size input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--text);
+  font: inherit;
+}
+.desk-margins {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+.desk-margins li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+.desk-margins li > span {
+  width: 64px;
+  color: var(--muted);
+}
+.desk-margins output {
+  min-width: 64px;
+  font-variant-numeric: tabular-nums;
+}
+.desk-result.picking canvas {
+  cursor: crosshair;
+}
+.desk-calib {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.desk-swatch {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+.desk-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.desk-tabs button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.desk-tabs button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.desk-list,
+.desk-gallery ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.desk-list li,
+.desk-gallery li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.desk-card {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.desk-card:hover {
+  border-color: var(--guide-strong);
+}
+.desk-card > span:first-of-type {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.desk-thumb {
+  flex: none;
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 5px;
+  background: #2a2d36;
+}
+.desk-gallery {
+  align-self: stretch;
+  max-width: 460px;
+  width: 100%;
+  margin: 8px auto 0;
+  text-align: left;
+}
+.desk-gallery h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #dfe3ee;
+}
+.desk-gallery .desk-card {
+  background: #252830;
+  border-color: #3a3f4b;
+  color: #dfe3ee;
+}
+.desk-gallery .doc-delete {
+  color: #9aa1b5;
+}
+.check.backup-desks {
+  margin: 4px 2px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.desk-list li:hover .doc-delete,
+.desk-gallery li:hover .doc-delete,
+.desk-list .doc-delete:focus-visible,
+.desk-gallery .doc-delete:focus-visible {
+  opacity: 1;
+}

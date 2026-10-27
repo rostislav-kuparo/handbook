@@ -37,7 +37,7 @@ export function flowPages(
   const out: PlacedItem[][] = [[]];
   let y = titleH;
   const place = (item: InkItem, h: number) => {
-    if (y > 0 && y + h > contentH + 0.5 && h <= contentH) {
+    if (y > 0 && y + h > contentH + 0.5 && h <= contentH + 0.5) {
       out.push([]);
       y = 0;
     }

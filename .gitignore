@@ -3,7 +3,10 @@ dist/
 target/
 public/vendor/
 crates/glyph-core/pkg/
+crates/desk-core/pkg/
 src-tauri/gen/
 backup/
 *.log
 .claude/
+# Real photos for local tests only (may show personal papers).
+crates/desk-core/fixtures/real/

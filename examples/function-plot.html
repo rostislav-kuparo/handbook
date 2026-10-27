@@ -1,0 +1,309 @@
+<!--
+  Тестовый график для HTML-блока Handbook.
+  «Вставить блок» → «Свой HTML» → «Код» → вставьте этот текст → «Применить».
+  Формулы можно менять прямо под графиком: sin(x), x^2/8 - 1, 2x + 1, sqrt(x), tg(x)…
+  Всё сохраняется в документе.
+-->
+<style>
+  .wrap { padding: 4px 2px 8px; }
+  svg { width: 100%; height: auto; display: block; }
+  .rows { display: grid; gap: 4px; margin: 4px 0 6px; font-size: 17px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row b { font-weight: normal; white-space: nowrap; }
+  input { font: inherit; color: inherit; background: transparent; border: 0; outline: none; padding: 1px 4px;
+          border-bottom: 1.5px dashed color-mix(in srgb, currentColor 45%, transparent); }
+  input:focus { border-bottom-color: currentColor; }
+  .row input.f { flex: 1; min-width: 0; }
+  .row input.c { width: 26px; height: 22px; padding: 0; border: 0; cursor: pointer; }
+  .err { color: #d9533f; font-size: 14px; white-space: nowrap; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 16px; }
+  .bar input { width: 64px; text-align: center; }
+  button { font: inherit; font-size: 15px; color: inherit; background: transparent; cursor: pointer; padding: 0 10px;
+           border: 1.5px solid color-mix(in srgb, currentColor 50%, transparent); border-radius: 8px; }
+  button.del { border: 0; padding: 0 4px; opacity: 0.55; }
+</style>
+
+<div class="wrap">
+  <svg id="plot" viewBox="0 0 600 340" role="img" aria-label="График функций"></svg>
+  <div class="rows" id="rows"></div>
+  <div class="bar">
+    x от <input id="xmin" title="Можно писать и так: -2pi"> до <input id="xmax">
+    <button id="add">+ функция</button>
+  </div>
+</div>
+
+<script>
+const DEFAULT = {
+  title: 'Тестовый график',
+  xmin: -6.3,
+  xmax: 6.3,
+  fns: [
+    { expr: 'sin(x)', color: '' },
+    { expr: 'x^2/8 - 1', color: '#d65a3a' },
+  ],
+};
+const PALETTE = ['#2f9a5b', '#9a4fd0', '#c58a12', '#2f6fd6'];
+const W = 600, H = 340, L = 44, R = 18, T = 44, B = 30;
+const NS = 'http://www.w3.org/2000/svg';
+const svg = document.getElementById('plot');
+const rowsEl = document.getElementById('rows');
+let state = null;
+let saveTimer = 0;
+
+// ---- Формулы. eval в блоках запрещён, поэтому маленький разборщик:
+// + - * / ^, скобки, sin cos tg ctg sqrt abs ln lg exp arcsin…, pi, e, «2x», x², π.
+const FUNCS = {
+  sin: Math.sin, cos: Math.cos, tan: Math.tan, tg: Math.tan, cot: (v) => 1 / Math.tan(v), ctg: (v) => 1 / Math.tan(v),
+  sqrt: Math.sqrt, abs: Math.abs, ln: Math.log, log: Math.log10, lg: Math.log10, exp: Math.exp,
+  asin: Math.asin, acos: Math.acos, atan: Math.atan, arcsin: Math.asin, arccos: Math.acos, arctg: Math.atan,
+};
+const CONSTS = { pi: Math.PI, e: Math.E };
+
+function compile(src) {
+  const text = src
+    .replace(/^\s*[yу]\s*=/i, '').replace(/х/g, 'x').replace(/²/g, '^2').replace(/³/g, '^3').replace(/π/g, 'pi')
+    .replace(/[·×]/g, '*').replace(/[−–]/g, '-').replace(/÷/g, '/').replace(/,/g, '.');
+  const toks = [];
+  const re = /\s*(\d+\.?\d*|\.\d+|[a-z]+|[-+*/^()])/giy;
+  while (re.lastIndex < text.length) {
+    const at = re.lastIndex;
+    const m = re.exec(text);
+    if (!m) {
+      if (/^\s*$/.test(text.slice(at))) break;
+      throw new Error('непонятный знак «' + text.slice(at).trim()[0] + '»');
+    }
+    toks.push(m[1]);
+  }
+  let i = 0;
+  const peek = () => toks[i];
+  const take = (t) => { if (toks[i] !== t) throw new Error('нужна «' + t + '»'); i++; };
+  const startsAtom = (t) => t !== undefined && /^[\d.a-z(]/i.test(t);
+  const expr = () => {
+    let f = term();
+    while (peek() === '+' || peek() === '-') {
+      const op = toks[i++], a = f, b = term();
+      f = op === '+' ? (x) => a(x) + b(x) : (x) => a(x) - b(x);
+    }
+    return f;
+  };
+  const term = () => {
+    let f = unary();
+    for (;;) {
+      const t = peek();
+      if (t === '*' || t === '/') {
+        i++;
+        const a = f, b = unary();
+        f = t === '*' ? (x) => a(x) * b(x) : (x) => a(x) / b(x);
+      } else if (startsAtom(t)) {
+        const a = f, b = power(); // 2x, 3sin(x), (x+1)(x-1)
+        f = (x) => a(x) * b(x);
+      } else return f;
+    }
+  };
+  const unary = () => {
+    if (peek() === '-') { i++; const a = unary(); return (x) => -a(x); }
+    if (peek() === '+') { i++; return unary(); }
+    return power();
+  };
+  const power = () => {
+    const a = atom();
+    if (peek() !== '^') return a;
+    i++;
+    const b = unary();
+    return (x) => Math.pow(a(x), b(x));
+  };
+  const atom = () => {
+    const t = toks[i++];
+    if (t === undefined) throw new Error('формула оборвалась');
+    if (t === '(') { const f = expr(); take(')'); return f; }
+    if (/^[\d.]/.test(t)) { const v = parseFloat(t); return () => v; }
+    const name = t.toLowerCase();
+    if (name === 'x') return (x) => x;
+    if (name in CONSTS) { const v = CONSTS[name]; return () => v; }
+    if (name in FUNCS) {
+      const fn = FUNCS[name];
+      // sin(x)^2 = (sin x)^2, а sin x^2 = sin(x^2) — как в учебнике.
+      let a;
+      if (peek() === '(') { i++; a = expr(); take(')'); } else a = power();
+      return (x) => fn(a(x));
+    }
+    throw new Error('не знаю «' + t + '»');
+  };
+  const f = expr();
+  if (i < toks.length) throw new Error('лишнее «' + toks[i] + '»');
+  return f;
+}
+
+// ---- Рисование: оси и подписи вашим почерком, линии — «от руки» (rough.js).
+const el = (name, attrs, parent = svg) => {
+  const node = document.createElementNS(NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  parent.appendChild(node);
+  return node;
+};
+const text = (x, y, str, size, anchor = 'middle', fill = block.ink) => {
+  const t = el('text', { x, y, 'font-size': size, 'text-anchor': anchor, fill, 'font-family': block.font });
+  t.textContent = str;
+  return t;
+};
+const niceStep = (span, n) => {
+  const raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw))), k = raw / p;
+  return (k < 1.5 ? 1 : k < 3.5 ? 2 : k < 7.5 ? 5 : 10) * p;
+};
+const fmt = (v) => String(Math.round(v * 1000) / 1000).replace('.', ',').replace('-', '−');
+
+function draw() {
+  if (!state) return;
+  const ink = block.ink;
+  svg.textContent = '';
+  const rc = rough.svg(svg);
+  const { xmin, xmax } = state;
+  const fns = state.fns.map((fn, k) => {
+    try { return { ...fn, f: compile(fn.expr), k }; } catch (e) { return { ...fn, err: e.message, k }; }
+  });
+
+  // Точки и разумный диапазон y (выбросы вроде tg у асимптот не растягивают график).
+  const N = 360;
+  const xs = Array.from({ length: N + 1 }, (_, j) => xmin + ((xmax - xmin) * j) / N);
+  const series = fns.map((fn) => (fn.f ? xs.map((x) => [x, fn.f(x)]) : []));
+  const ys = series.flat().map((p) => p[1]).filter(Number.isFinite).sort((a, b) => a - b);
+  let lo = ys.length ? ys[Math.floor(ys.length * 0.02)] : -1;
+  let hi = ys.length ? ys[Math.max(0, Math.ceil(ys.length * 0.98) - 1)] : 1;
+  if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+  if (lo > 0 && lo < (hi - lo) * 0.5) lo = 0;
+  if (hi < 0 && -hi < (hi - lo) * 0.5) hi = 0;
+  const pad = (hi - lo) * 0.1;
+  const ymin = lo - pad, ymax = hi + pad;
+  const X = (x) => L + ((x - xmin) / (xmax - xmin)) * (W - L - R);
+  const Y = (y) => T + ((ymax - y) / (ymax - ymin)) * (H - T - B);
+
+  // Сетка
+  const sx = niceStep(xmax - xmin, 8), sy = niceStep(ymax - ymin, 6);
+  const grid = el('g', { stroke: ink, 'stroke-opacity': 0.12, 'stroke-width': 1 });
+  for (let x = Math.ceil(xmin / sx) * sx; x <= xmax + 1e-9; x += sx) el('line', { x1: X(x), x2: X(x), y1: T, y2: H - B }, grid);
+  for (let y = Math.ceil(ymin / sy) * sy; y <= ymax + 1e-9; y += sy) el('line', { x1: L, x2: W - R, y1: Y(y), y2: Y(y) }, grid);
+
+  // Оси со стрелками
+  const ax = Math.min(Math.max(Y(0), T), H - B), ay = Math.min(Math.max(X(0), L), W - R);
+  const axis = { stroke: ink, strokeWidth: 1.6, roughness: 1, seed: 11 };
+  svg.appendChild(rc.line(L - 6, ax, W - R + 8, ax, axis));
+  svg.appendChild(rc.line(ay, H - B + 6, ay, T - 10, axis));
+  svg.appendChild(rc.linearPath([[W - R - 2, ax - 5], [W - R + 8, ax], [W - R - 2, ax + 5]], axis));
+  svg.appendChild(rc.linearPath([[ay - 5, T - 1], [ay, T - 10], [ay + 5, T - 1]], axis));
+  text(W - R + 6, ax - 9, 'x', 17);
+  text(ay + 12, T - 6, 'y', 17, 'start');
+  for (let x = Math.ceil(xmin / sx) * sx; x <= xmax + 1e-9; x += sx) {
+    if (Math.abs(x) < sx / 2) continue;
+    svg.appendChild(rc.line(X(x), ax - 3, X(x), ax + 3, { ...axis, roughness: 0.4 }));
+    text(X(x), ax + 17, fmt(x), 14);
+  }
+  for (let y = Math.ceil(ymin / sy) * sy; y <= ymax + 1e-9; y += sy) {
+    if (Math.abs(y) < sy / 2) continue;
+    svg.appendChild(rc.line(ay - 3, Y(y), ay + 3, Y(y), { ...axis, roughness: 0.4 }));
+    text(ay - 7, Y(y) + 5, fmt(y), 14, 'end');
+  }
+  text(ay - 8, ax + 16, '0', 14, 'end');
+
+  // Кривые: рвутся на разрывах (асимптоты, корень из отрицательного), обрезаются по полю.
+  const defs = el('defs', {});
+  const clip = el('clipPath', { id: 'area' }, defs);
+  el('rect', { x: L, y: T - 4, width: W - L - R, height: H - T - B + 8 }, clip);
+  const curves = el('g', { 'clip-path': 'url(#area)' });
+  const span = ymax - ymin;
+  fns.forEach((fn, k) => {
+    const color = fn.color || ink;
+    let seg = [];
+    const flush = () => {
+      if (seg.length > 1) curves.appendChild(rc.curve(seg, { stroke: color, strokeWidth: 2.4, roughness: 0.5, seed: 3 + k, disableMultiStroke: true }));
+      seg = [];
+    };
+    let prev = null;
+    for (const [x, y] of series[k]) {
+      const ok = Number.isFinite(y) && y > ymin - span && y < ymax + span;
+      if (!ok || (prev !== null && Math.abs(y - prev) > span * 0.8)) flush();
+      if (ok) seg.push([X(x), Y(y)]);
+      prev = ok ? y : null;
+    }
+    flush();
+  });
+
+  // Заголовок и подписи функций
+  text(W / 2, 24, state.title || '', 22);
+  let ly = T + 8;
+  fns.forEach((fn) => {
+    if (fn.err) return;
+    const color = fn.color || ink;
+    svg.appendChild(rc.line(L + 12, ly, L + 36, ly, { stroke: color, strokeWidth: 2.4, roughness: 0.5, seed: 21 }));
+    text(L + 44, ly + 5, 'y = ' + fn.expr, 16, 'start', color);
+    ly += 22;
+  });
+
+  syncInputs(fns.map((fn) => fn.err));
+}
+
+// ---- Поля под графиком
+function syncInputs(errors) {
+  if (rowsEl.children.length !== state.fns.length) {
+    rowsEl.textContent = '';
+    state.fns.forEach((_, k) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML =
+        '<b>y =</b><input class="f" spellcheck="false"><input class="c" type="color" title="Цвет линии">' +
+        '<span class="err"></span><button class="del" title="Убрать функцию">✕</button>';
+      const [f, c] = row.querySelectorAll('input');
+      f.addEventListener('input', () => change((d) => { d.fns[k].expr = f.value; }));
+      c.addEventListener('input', () => change((d) => { d.fns[k].color = c.value; }));
+      row.querySelector('.del').addEventListener('click', () => change((d) => { d.fns.splice(k, 1); }, true));
+      rowsEl.appendChild(row);
+    });
+  }
+  const hex = (c) => (/^#[0-9a-f]{6}$/i.test(c) ? c : '#1f2a6b');
+  state.fns.forEach((fn, k) => {
+    const row = rowsEl.children[k];
+    const [f, c] = row.querySelectorAll('input');
+    if (document.activeElement !== f) f.value = fn.expr;
+    c.value = hex(fn.color || block.ink);
+    row.querySelector('.err').textContent = errors[k] ? '⚠ ' + errors[k] : '';
+  });
+  for (const id of ['xmin', 'xmax']) {
+    const inp = document.getElementById(id);
+    if (document.activeElement !== inp) inp.value = fmt(state[id]);
+  }
+}
+
+/** Меняем данные: рисуем сразу, в документ сохраняем, когда перестали печатать. */
+function change(mutate, now = false) {
+  const next = structuredClone(state);
+  mutate(next);
+  state = next;
+  draw();
+  clearTimeout(saveTimer);
+  if (now) block.setData(state);
+  else saveTimer = setTimeout(() => block.setData(state), 400);
+}
+
+for (const id of ['xmin', 'xmax']) {
+  document.getElementById(id).addEventListener('change', (e) => {
+    let v = NaN;
+    try { v = compile(e.target.value)(0); } catch {}
+    const other = id === 'xmin' ? state.xmax : state.xmin;
+    if (Number.isFinite(v) && (id === 'xmin' ? v < other : v > other)) change((d) => { d[id] = v; }, true);
+    else e.target.value = fmt(state[id]);
+  });
+}
+document.getElementById('add').addEventListener('click', () => {
+  change((d) => { d.fns.push({ expr: 'x', color: PALETTE[d.fns.length % PALETTE.length] }); }, true);
+  const inputs = rowsEl.querySelectorAll('input.f');
+  inputs[inputs.length - 1]?.select();
+});
+
+block.onData((d) => {
+  if (d === state) return;
+  if (!d || !Array.isArray(d.fns)) { block.setData(structuredClone(DEFAULT)); return; }
+  state = d;
+  draw();
+});
+block.onFont(draw);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+</script>

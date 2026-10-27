@@ -25,6 +25,8 @@ export interface ParagraphRender {
   /** The same ink per line and colour index (same coordinates), to flow lines onto pages. */
   lineD: { color: number; d: string }[][];
   missing: string[];
+  /** Centre lines of the strokes per line, when asked for (`CharStyles.skeleton`): flat x, y, radius, pressure. */
+  lineSkel?: { color: number; pts: number[] }[][];
   /** Characters without handwriting: drawn with a fallback font at these baseline positions. */
   fallback: { ch: string; x: number; y: number; line: number; scale: number; color: number }[];
 }
@@ -71,6 +73,8 @@ export interface CharStyles {
   shifts?: number[];
   /** How often each word of the paragraph occurred earlier in the document (repeats get new letters). */
   seen?: Record<string, number>;
+  /** Also return the strokes' centre lines with pressure (`lineSkel`). */
+  skeleton?: boolean;
 }
 
 export const engine = {

@@ -6,6 +6,29 @@ export const SHEET_H = Math.round(297 * MM); // 1123
 export const SHEET_GAP = 28;
 export const PITCH = SHEET_H + SHEET_GAP;
 
+/** Size of a sheet in CSS pixels. */
+export interface SheetSize {
+  w: number;
+  h: number;
+}
+
+export const A4: SheetSize = { w: SHEET_W, h: SHEET_H };
+
+/** Paper a photo of a desk may show (documents themselves are always A4). */
+export type SheetKind = 'a4' | 'notebook' | 'a5';
+
+export const SHEET_KINDS: Record<SheetKind, { name: string; mm: [number, number] }> = {
+  a4: { name: 'A4', mm: [210, 297] },
+  notebook: { name: 'Тетрадный', mm: [165, 205] },
+  a5: { name: 'A5', mm: [148, 210] },
+};
+
+export function sheetSize(kind: SheetKind): SheetSize {
+  if (kind === 'a4') return A4;
+  const [w, h] = SHEET_KINDS[kind].mm;
+  return { w: w * MM, h: h * MM };
+}
+
 export type PaperStyle = 'ruled' | 'grid' | 'plain';
 
 /**
@@ -108,6 +131,8 @@ export function sheetNumber(setup: Pick<PageSetup, 'pageNumbers' | 'firstNumber'
 
 /** Sheet geometry for a page setup, in stack pixels. */
 export interface Geometry {
+  /** The sheet itself (A4 everywhere but in a photo of another sheet). */
+  sheet: SheetSize;
   margin: { top: number; bottom: number; left: number; right: number };
   contentW: number;
   contentH: number;
@@ -117,20 +142,29 @@ export interface Geometry {
   contentBottom: (p: number) => number;
 }
 
-export function geometry(setup: PageSetup): Geometry {
-  const px = (mm: number) => Math.round(Math.min(Math.max(mm, 5), 60) * MM);
+/**
+ * `sheet`: another paper size (text re-flowed onto it); `exact`: margins in
+ * fractions of a pixel, for ink that must meet printed lines in a photo.
+ */
+export function geometry(setup: PageSetup, sheet: SheetSize = A4, exact = false): Geometry {
+  const px = (mm: number) => {
+    const v = Math.min(Math.max(mm, 5), 60) * MM;
+    return exact ? v : Math.round(v);
+  };
   const margin = {
     top: px(setup.margins.top),
     bottom: px(setup.margins.bottom),
     left: px(setup.margins.left),
     right: px(setup.margins.right),
   };
+  const pitch = sheet.h + SHEET_GAP;
   return {
+    sheet,
     margin,
-    contentW: SHEET_W - margin.left - margin.right,
-    contentH: SHEET_H - margin.top - margin.bottom,
-    contentTop: (p) => p * PITCH + margin.top,
-    contentBottom: (p) => p * PITCH + SHEET_H - margin.bottom,
+    contentW: sheet.w - margin.left - margin.right,
+    contentH: sheet.h - margin.top - margin.bottom,
+    contentTop: (p) => p * pitch + margin.top,
+    contentBottom: (p) => p * pitch + sheet.h - margin.bottom,
   };
 }
 

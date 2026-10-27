@@ -1,6 +1,8 @@
 import type { Editor } from '@tiptap/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TEMPLATES } from '../blocks/templates';
+import { DeskDialog } from '../desk/DeskDialog';
+import { exportDesks, importDesks } from '../desk/desks';
 import { SketchHelp } from '../sketch/SketchHelp';
 import { HAND_FONT_STACK } from '../engine/constants';
 import { useHandwriting } from '../engine/handwriting';
@@ -45,6 +47,9 @@ export function Documents() {
   const [printPending, setPrintPending] = useState(false);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [sketchHelp, setSketchHelp] = useState(false);
+  const [desk, setDesk] = useState(false);
+  /** The full backup also carries «Мои столы» (their photos make it large). */
+  const [backupDesks, setBackupDesks] = useState(false);
   /** Drawings still sitting in the text as ```…```, counted when the insert menu opens. */
   const [fences, setFences] = useState(0);
   // Content of the open document, tagged with its id so a stale one is never shown.
@@ -114,7 +119,8 @@ export function Documents() {
       const data = JSON.parse(await file.text());
       if (data?.format === 'handbook-backup') {
         const n = await importEverything(data);
-        alert(`Загружено из резервной копии: документов — ${n.documents}, вариантов букв — ${n.samples}.`);
+        const desks = Array.isArray(data.desks) ? await importDesks(data.desks) : 0;
+        alert(`Загружено из резервной копии: документов — ${n.documents}, вариантов букв — ${n.samples}${desks ? `, столов — ${desks}` : ''}.`);
         return;
       }
       if (data?.format === 'handbook-handwriting') {
@@ -132,7 +138,7 @@ export function Documents() {
   };
 
   const saveEverything = async () => {
-    const data = await exportEverything();
+    const data = await exportEverything(backupDesks ? await exportDesks() : undefined);
     const day = new Date().toISOString().slice(0, 10);
     await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), `handbook-backup-${day}.json`);
   };
@@ -190,6 +196,10 @@ export function Documents() {
         <button className="btn wide open-doc" onClick={() => void saveEverything()} title="Почерк, все документы и настройки — одним файлом">
           Резервная копия всего
         </button>
+        <label className="check backup-desks" title="Фото столов для экспорта «На столе (фото)»: файл станет больше на 1–3 МБ за стол">
+          <input type="checkbox" checked={backupDesks} onChange={(e) => setBackupDesks(e.target.checked)} />
+          со столами (фото)
+        </label>
         <input
           ref={openRef}
           type="file"
@@ -313,6 +323,10 @@ export function Documents() {
                   <button onClick={(e) => (closeMenus(e.currentTarget), void exportSvg(pageExport()))}>
                     <strong>Вектор SVG</strong>
                   </button>
+                  <button onClick={(e) => (closeMenus(e.currentTarget), setDesk(true))}>
+                    <strong>На столе (фото)…</strong>
+                    <span className="muted small">текст на снимке настоящего листа, JPG</span>
+                  </button>
                   <button disabled={!fontBytes} onClick={(e) => (closeMenus(e.currentTarget), void exportFont())}>
                     <strong>Мой шрифт .ttf</strong>
                     <span className="muted small">для Word, Figma и т. п.</span>
@@ -379,6 +393,7 @@ export function Documents() {
         )}
       </main>
       {sketchHelp && <SketchHelp onClose={() => setSketchHelp(false)} />}
+      {desk && doc && content && <DeskDialog base={pageExport()} setup={setup} onClose={() => setDesk(false)} />}
     </div>
   );
 }

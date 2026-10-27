@@ -1,7 +1,7 @@
 {
   "name": "handbook",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.4",
   "type": "module",
   "description": "Handwriting text editor: your own handwriting as a living font, with embedded HTML blocks",
   "scripts": {
@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:core": "node scripts/with-cargo.mjs cargo test -p glyph-core",
+    "test:desk": "node scripts/with-cargo.mjs cargo test -p desk-core --release",
     "tauri": "node scripts/with-cargo.mjs tauri",
     "app": "node scripts/with-cargo.mjs tauri dev",
     "app:build": "node scripts/with-cargo.mjs tauri build"
