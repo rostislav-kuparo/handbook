@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Margins, ObjectMask, Ruling } from './analysis';
+import { along, type HandMargins, type MarginLine, type ObjectMask, type Ruling } from './analysis';
 import { apply, homography, invert, type Pt } from './homography';
 import type { Photo } from './photo';
 import { warpMap, type Warp } from './warp';
@@ -9,11 +9,14 @@ const PAD = 12;
 const GRAB = 10;
 /** How near (mm) a dragged margin sticks to a printed line. */
 const STICK = 1.2;
+const PINK = 'rgba(255, 60, 150, 0.9)';
 
 export type Brush = 'erase' | 'restore';
 /** What the pointer does: paints the mask, or moves the margin lines. */
 export type MaskTool = 'brush' | 'margins';
-type Side = keyof Margins;
+type Side = keyof HandMargins;
+/** What of a margin line is taken: one of its ends (it turns round the other), or the whole line. */
+type Part = 'a' | 'b' | 'mid';
 const VERTICAL: Record<Side, boolean> = { left: true, right: true, top: false, bottom: false };
 
 interface Props {
@@ -24,21 +27,23 @@ interface Props {
   paperMm: [number, number];
   ruling: Ruling | null;
   /** The margin lines the text keeps within, mm. */
-  margins: Margins;
+  margins: HandMargins;
   mask: ObjectMask | null;
   tool: MaskTool;
   brush: Brush;
   /** Brush radius, photo px. */
   radius: number;
   onChange: (mask: ObjectMask) => void;
-  onMargins: (margins: Margins) => void;
+  onMargins: (margins: HandMargins) => void;
 }
 
 /**
  * The photo with what lies on the sheet in red (no text there), the printed
  * lines that were found and the margin lines. A brush marks more («стереть»
  * — no text here) or gives the paper back («вернуть»); the margin lines can
- * be dragged, and stick to the printed lines.
+ * be dragged whole or by an end (then they turn round the other end), and
+ * stick to the printed lines (not with Alt); a double click sets a line
+ * along the printed lines again.
  */
 export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, brush, radius, onChange, onMargins }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -49,8 +54,8 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
   /** The mask being painted (a copy) and its red overlay. */
   const work = useRef<{ data: Uint8Array; overlay: OffscreenCanvas; image: ImageData } | null>(null);
   const painting = useRef(false);
-  /** The margin line under the pointer, or being dragged (with where it is now, mm). */
-  const [grab, setGrab] = useState<{ side: Side; value: number; dragging: boolean } | null>(null);
+  /** The margin line (and which part of it) under the pointer, or being dragged (with where it is now, mm). */
+  const [grab, setGrab] = useState<{ side: Side; part: Part; line: MarginLine; dragging: boolean } | null>(null);
   const [, redraw] = useState(0);
   const dpr = window.devicePixelRatio || 1;
 
@@ -135,13 +140,24 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
         for (let x = ruling.colOffset; x < wMm; x += ruling.colStep ?? ruling.step) line([x, 0], [x - hMm * ruling.slope, hMm]);
       }
     }
-    // The margin lines, the one at hand thicker.
+    // The margin lines, the one at hand thicker; with the margins tool, their ends to take.
     for (const side of Object.keys(VERTICAL) as Side[]) {
-      const v = grab?.side === side ? grab.value : margins[side];
-      if (v === null) continue;
+      const l = grab?.side === side ? grab.line : margins[side];
+      if (!l) continue;
       ctx.lineWidth = grab?.side === side ? 3 : 2;
-      ctx.strokeStyle = 'rgba(255, 60, 150, 0.9)';
-      line(...ends(side, v));
+      ctx.strokeStyle = PINK;
+      const [e0, e1] = ends(side, l);
+      line(e0, e1);
+      if (tool !== 'margins') continue;
+      for (const [part, e] of [['a', e0], ['b', e1]] as const) {
+        const held = grab?.side === side && grab.part === part;
+        ctx.beginPath();
+        ctx.arc(...at(...e), held ? 6.5 : 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = held ? PINK : '#fff';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
     }
     if (cursor && tool === 'brush') {
       ctx.beginPath();
@@ -157,46 +173,66 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
     const [px, py] = map(x / paperMm[0], y / paperMm[1]);
     return [ox + px * s, oy + py * s];
   }
-  /** The ends of a margin line at `v` mm (it leans with the printed lines). */
-  function ends(side: Side, v: number): [Pt, Pt] {
+  /** The ends of a margin line on the sheet's edges, mm. */
+  function ends(side: Side, l: MarginLine): [Pt, Pt] {
     const [wMm, hMm] = paperMm;
-    const slope = ruling?.slope ?? 0;
-    return VERTICAL[side] ? [[v, 0], [v - hMm * slope, hMm]] : [[0, v], [wMm, v + wMm * slope]];
+    return VERTICAL[side] ? [[l.a, 0], [l.b, hMm]] : [[0, l.a], [wMm, l.b]];
   }
   /** A screen point on the sheet, mm (by the sheet's perspective; its bow is small here). */
   const toSheet = (p: Pt): Pt => {
     const [u, v] = apply(invert(homography([[0, 0], [1, 0], [1, 1], [0, 1]], warp.corners)), [(p[0] - ox) / s, (p[1] - oy) / s]);
     return [u * paperMm[0], v * paperMm[1]];
   };
-  /** The margin line within reach of screen point p. */
-  const nearest = (p: Pt): Side | null => {
+  /** The margin line within reach of screen point p, and which part of it: its ends come first. */
+  const nearest = (p: Pt): { side: Side; part: Part } | null => {
     const [x, y] = toSheet(p);
-    const slope = ruling?.slope ?? 0;
-    let best: { side: Side; d: number } | null = null;
+    const near: { side: Side; part: Part; d: number }[] = [];
     for (const side of Object.keys(VERTICAL) as Side[]) {
-      const v = margins[side];
-      if (v === null) continue;
+      const l = margins[side];
+      if (!l) continue;
+      const [e0, e1] = ends(side, l);
       // The point of the line level with p, on the screen.
-      const q = VERTICAL[side] ? at(v - y * slope, y) : at(x, v + x * slope);
-      const d = Math.hypot(q[0] - p[0], q[1] - p[1]);
-      if (d < GRAB && (!best || d < best.d)) best = { side, d };
-    }
-    return best?.side ?? null;
-  };
-  /** Where a margin line goes for the pointer at p: through it, sticking to a printed line nearby. */
-  const placeAt = (side: Side, p: Pt): number => {
-    const [x, y] = toSheet(p);
-    const slope = ruling?.slope ?? 0;
-    const [wMm, hMm] = paperMm;
-    let v = VERTICAL[side] ? x + y * slope : y - x * slope;
-    if (ruling) {
-      const [start, step] = VERTICAL[side] ? [ruling.colOffset, ruling.colStep ?? ruling.step] : [ruling.offset, ruling.step];
-      if (start !== null) {
-        const printed = start + Math.round((v - start) / step) * step;
-        if (Math.abs(printed - v) < STICK) v = printed;
+      const level = VERTICAL[side] ? at(along(l, y / paperMm[1]), y) : at(x, along(l, x / paperMm[0]));
+      for (const [part, q, reach] of [['a', at(...e0), 4], ['b', at(...e1), 4], ['mid', level, 0]] as const) {
+        near.push({ side, part, d: Math.hypot(q[0] - p[0], q[1] - p[1]) - reach });
       }
     }
-    return Math.min(Math.max(v, 0), VERTICAL[side] ? wMm : hMm);
+    const best = near.filter((n) => n.d < GRAB).sort((m, n) => m.d - n.d)[0];
+    return best ? { side: best.side, part: best.part } : null;
+  };
+  /**
+   * Where a margin line goes for the pointer at p: the taken end there (the
+   * other one stays), or the whole line through it; sticking to a printed
+   * line nearby, unless `free`.
+   */
+  const moveTo = (side: Side, part: Part, l: MarginLine, p: Pt, free: boolean): MarginLine => {
+    const [x, y] = toSheet(p);
+    const [wMm, hMm] = paperMm;
+    const vertical = VERTICAL[side];
+    const [length, across, room] = vertical ? [hMm, x, wMm] : [wMm, y, hMm];
+    // Where along the line the pointer is: 0 at its `a` end, 1 at its `b` end.
+    const t = part === 'a' ? 0 : part === 'b' ? 1 : Math.min(1, Math.max(0, (vertical ? y : x) / length));
+    const shift = (n: MarginLine, d: number): MarginLine =>
+      part === 'mid' ? { a: n.a + d, b: n.b + d } : part === 'a' ? { ...n, a: n.a + d } : { ...n, b: n.b + d };
+    let n = shift(l, across - along(l, t));
+    if (ruling && !free) {
+      const [start, step] = vertical ? [ruling.colOffset, ruling.colStep ?? ruling.step] : [ruling.offset, ruling.step];
+      if (start !== null) {
+        // The printed lines lean: columns x = start + k·step − y·slope, rows y = start + k·step + x·slope.
+        const u = along(n, t) + (vertical ? 1 : -1) * ruling.slope * t * length;
+        const printed = start + Math.round((u - start) / step) * step;
+        if (Math.abs(printed - u) < STICK) n = shift(n, printed - u);
+      }
+    }
+    const clamp = (v: number) => Math.min(Math.max(v, 0), room);
+    return { a: clamp(n.a), b: clamp(n.b) };
+  };
+  /** The line along the printed lines again, through its middle. */
+  const straighten = (side: Side, l: MarginLine): MarginLine => {
+    const slope = ruling?.slope ?? 0;
+    const lean = VERTICAL[side] ? -slope * paperMm[1] : slope * paperMm[0];
+    const mid = along(l, 0.5);
+    return { a: mid - lean / 2, b: mid + lean / 2 };
   };
 
   /** Paints a disc of the brush at screen point p into the mask copy and its overlay. */
@@ -225,13 +261,13 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
     w.overlay.getContext('2d')!.putImageData(w.image, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
   };
 
-  const pointer = (e: React.PointerEvent): Pt => {
+  const pointer = (e: React.MouseEvent): Pt => {
     const r = canvasRef.current!.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   };
   const finish = () => {
     if (grab?.dragging) {
-      onMargins({ ...margins, [grab.side]: grab.value });
+      onMargins({ ...margins, [grab.side]: grab.line });
       setGrab(null);
     }
     if (!painting.current) return;
@@ -240,7 +276,7 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
   };
 
   const brushing = tool === 'brush';
-  const resize = grab ? (VERTICAL[grab.side] ? 'ew-resize' : 'ns-resize') : 'default';
+  const resize = !grab ? 'default' : grab.part !== 'mid' ? (grab.dragging ? 'grabbing' : 'grab') : VERTICAL[grab.side] ? 'ew-resize' : 'ns-resize';
   return (
     <div className="desk-corners" ref={wrapRef}>
       <canvas
@@ -250,10 +286,11 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
         onPointerDown={(e) => {
           const p = pointer(e);
           if (!brushing) {
-            const side = nearest(p);
-            if (!side) return;
+            const near = nearest(p);
+            const l = near && margins[near.side];
+            if (!near || !l) return;
             e.currentTarget.setPointerCapture(e.pointerId);
-            setGrab({ side, value: placeAt(side, p), dragging: true });
+            setGrab({ ...near, line: moveTo(near.side, near.part, l, p, e.altKey), dragging: true });
             return;
           }
           if (!mask) return;
@@ -265,10 +302,10 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
         onPointerMove={(e) => {
           const p = pointer(e);
           if (!brushing) {
-            if (grab?.dragging) setGrab({ ...grab, value: placeAt(grab.side, p) });
+            if (grab?.dragging) setGrab({ ...grab, line: moveTo(grab.side, grab.part, margins[grab.side] ?? grab.line, p, e.altKey) });
             else {
-              const side = nearest(p);
-              setGrab(side ? { side, value: margins[side]!, dragging: false } : null);
+              const near = nearest(p);
+              setGrab(near ? { ...near, line: margins[near.side]!, dragging: false } : null);
             }
             return;
           }
@@ -276,6 +313,11 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
           setCursor(p);
         }}
         onPointerUp={finish}
+        onDoubleClick={(e) => {
+          const near = brushing ? null : nearest(pointer(e));
+          const l = near && margins[near.side];
+          if (near && l) onMargins({ ...margins, [near.side]: straighten(near.side, l) });
+        }}
         onPointerCancel={finish}
         onPointerLeave={() => {
           setCursor(null);

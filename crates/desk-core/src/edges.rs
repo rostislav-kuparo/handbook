@@ -653,3 +653,59 @@ pub fn curved_sides(photo: &Photo, corners: [Pt; 4]) -> Curved {
         .fold(0.0, f64::max);
     Curved { corners: moved, bulge, max, fitted }
 }
+
+/// Whether the side `a → b` (clockwise, outward to its left) is a line
+/// printed on the paper rather than the sheet's edge: the same paper, ruled
+/// alike, on both sides of it. On a close-up of a notebook the sheet search
+/// may take a row or a column of squares for an edge; the real edge has the
+/// desk — another brightness, or no ruling — beyond it.
+pub fn paper_both_sides(photo: &Photo, a: Pt, b: Pt) -> bool {
+    if dist(a, b) < 40.0 {
+        return false;
+    }
+    let n = Line::through(a, b).normal();
+    let reach = (0.03 * (photo.w as f64).hypot(photo.h as f64)).max(30.0).round() as i64;
+    let (w, h) = (photo.w as f64, photo.h as f64);
+    // A band along the side's middle part, on one side of it (+1: outward),
+    // the side's own line left out; the frame cuts it off. Each place: its
+    // brightness, what stands out of the brightness around it (lines and
+    // squares, not the light's slow changes), and its colour.
+    let inside = |x: f64, y: f64| x >= 0.0 && y >= 0.0 && x <= w && y <= h;
+    let band = |sign: i64| -> Vec<(f64, f64, [f64; 3])> {
+        let mut v = vec![];
+        for s in 4..=reach {
+            let s = (s * sign) as f64;
+            for i in 0..48 {
+                let t = 0.2 + 0.6 * (i as f64 + 0.5) / 48.0;
+                let (x, y) = (a[0] + (b[0] - a[0]) * t + n[0] * s, a[1] + (b[1] - a[1]) * t + n[1] * s);
+                if !inside(x - 8.0, y - 8.0) || !inside(x + 8.0, y + 8.0) {
+                    continue;
+                }
+                let l = photo.luma.sample(x, y);
+                let around = (-2..=2).flat_map(|j| (-2..=2).map(move |k| (j, k))).map(|(j, k)| photo.luma.sample(x + 4.0 * j as f64, y + 4.0 * k as f64)).sum::<f64>() / 25.0;
+                v.push((l, l - around, std::array::from_fn(|c| photo.lin_at(x, y, c) as f64)));
+            }
+        }
+        v
+    };
+    // Its level (median), how much it is ruled (against the level) and its colour (shares of r, g, b).
+    let look = |v: Vec<(f64, f64, [f64; 3])>| -> Option<(f64, f64, [f64; 3])> {
+        if v.len() < 8 * 48 {
+            return None;
+        }
+        let mut l: Vec<f64> = v.iter().map(|p| p.0).collect();
+        l.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let level = l[l.len() / 2].max(1e-6);
+        let ruled = (v.iter().map(|p| p.1 * p.1).sum::<f64>() / v.len() as f64).sqrt() / level;
+        let rgb: [f64; 3] = std::array::from_fn(|c| v.iter().map(|p| p.2[c]).sum::<f64>());
+        let sum = rgb.iter().sum::<f64>().max(1e-9);
+        Some((level, ruled, rgb.map(|c| c / sum)))
+    };
+    // Squares or lines, not the photo's noise.
+    const RULED: f64 = 0.03;
+    let Some((lin, rin, cin)) = look(band(-1)) else { return false };
+    // Next to the frame's border, nothing to see beyond: ruled paper up to the border goes on past it.
+    let Some((lout, rout, cout)) = look(band(1)) else { return rin > RULED };
+    let hue = (0..3).map(|c| (cin[c] - cout[c]).abs()).fold(0.0, f64::max);
+    (lin - lout).abs() < 0.06 * lin.max(lout) && hue < 0.006 && rin > RULED && rout > 0.4 * rin && rout < 2.5 * rin
+}

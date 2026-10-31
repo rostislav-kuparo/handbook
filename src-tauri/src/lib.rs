@@ -59,6 +59,26 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
     .unwrap()
 }
 
+/// Downloads\Handbook: every export goes into a folder of its own here.
+fn exports_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  Ok(app.path().download_dir().map_err(|e| e.to_string())?.join("Handbook"))
+}
+
+/// `<prefix>_1`, `<prefix>_2`… — the first folder name not taken in `dir`.
+fn free_folder(dir: &Path, prefix: &str) -> PathBuf {
+  (1..).map(|n| dir.join(format!("{prefix}_{n}"))).find(|p| !p.exists()).unwrap()
+}
+
+/// A new folder for one export, Downloads\Handbook\<date>_<n> (the n-th export that day); returns its name.
+#[tauri::command]
+fn new_export_folder(app: tauri::AppHandle, date: String) -> Result<String, String> {
+  let base = exports_dir(&app)?;
+  std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+  let dir = free_folder(&base, &clean_name(&date));
+  std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+  Ok(dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+}
+
 /// An exported file the user asks about: must still exist, be one of ours and lie in Downloads.
 fn exported_file(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
   let path = PathBuf::from(path);
@@ -76,7 +96,8 @@ fn exported_file(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> 
   Ok(path)
 }
 
-/// Saves an export (raw bytes; the name in the `x-file-name` header) into Downloads; returns the full path.
+/// Saves an export (raw bytes; the name in the `x-file-name` header) into Downloads — into the
+/// export's folder in Downloads\Handbook when the `x-folder` header names one; returns the full path.
 #[tauri::command]
 fn save_download(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
   let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
@@ -92,7 +113,16 @@ fn save_download(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Res
   if !has_export_type(Path::new(&name)) {
     return Err(format!("Такой файл сохранить нельзя: {name}"));
   }
-  let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+  let folder = request
+    .headers()
+    .get("x-folder")
+    .and_then(|v| v.to_str().ok())
+    .map(percent_decode)
+    .map(|n| clean_name(&n));
+  let dir = match folder {
+    Some(f) => exports_dir(&app)?.join(f),
+    None => app.path().download_dir().map_err(|e| e.to_string())?,
+  };
   std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
   let path = free_path(&dir, &name);
   std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
@@ -185,7 +215,7 @@ pub fn run() {
       }
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![save_download, reveal_file, open_file, pick_json, snap_layouts])
+    .invoke_handler(tauri::generate_handler![save_download, new_export_folder, reveal_file, open_file, pick_json, snap_layouts])
     .run(tauri::generate_context!())
     .expect("error while building tauri application");
 }
@@ -219,6 +249,9 @@ mod tests {
     std::fs::write(dir.join("a.png"), b"1").unwrap();
     assert_eq!(free_path(&dir, "a.png"), dir.join("a (1).png"));
     assert_eq!(free_path(&dir, "b.png"), dir.join("b.png"));
+    std::fs::create_dir_all(dir.join("2026-10-28_1")).unwrap();
+    assert_eq!(free_folder(&dir, "2026-10-28"), dir.join("2026-10-28_2"));
+    assert_eq!(free_folder(&dir, "2026-10-29"), dir.join("2026-10-29_1"));
     std::fs::remove_dir_all(&dir).unwrap();
   }
 }

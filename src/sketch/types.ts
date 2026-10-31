@@ -32,8 +32,23 @@ export type Shape =
   | { type: 'graph'; f: (x: number) => number; domain: [number, number] | null }
   | { type: 'curve'; f: (t: number) => Vec; t0: number; t1: number }
   | { type: 'text'; text: string; at: Vec | null }
+  /** A hatched area with no outline of its own (between graphs, under a graph). */
+  | { type: 'region'; pts: Vec[]; hatch: Hatching }
+  /**
+   * Short slanted ticks along a line, on the side where `side` lies; len and
+   * gap in units of the drawing. `line`: the line itself is drawn too (it was
+   * not on the drawing already).
+   */
+  | { type: 'hatched'; of: 'segment' | 'ray' | 'line'; a: Vec; b: Vec; side: Vec; line: boolean; len?: number; gap?: number }
   /** A figure in space; the drawing shows it as an epure, by its projections (see epure.ts). */
   | { type: 'space'; of: SpaceKind; pts: Vec3[] };
+
+/** How an area is hatched: direction (radians, counterclockwise from x), lines' spacing in units of the drawing (none: the usual), crosswise too. */
+export interface Hatching {
+  angle: number;
+  gap?: number;
+  cross: boolean;
+}
 
 export type Val =
   | { k: 'num'; v: number }
@@ -60,6 +75,10 @@ export interface Item {
   thickness: number;
   /** 0..1: hatching inside polygons and circles. */
   filling: number;
+  /** Hatching inside polygons and circles with its own direction and spacing (Hatch). */
+  hatch?: Hatching;
+  /** Points: 0 filled, 1 cross ×, 2 open circle, 3 plus + (as in GeoGebra). */
+  pointStyle?: number;
   hidden: boolean;
   /** Source line, 1-based. */
   line: number;
@@ -83,6 +102,12 @@ export interface View {
   xRight?: boolean;
   /** The drawing is an epure: figures in space were turned into projections. */
   epure?: boolean;
+  /**
+   * Drawn on a blank (НаБланке): the origin at (x, y) mm from the sheet's top
+   * left corner, `unit` mm per unit; no window of its own, no axes (they are
+   * printed), the drawing exactly where it falls on the sheet.
+   */
+  blank?: { x: number; y: number; unit: number };
 }
 
 export interface Scene {
@@ -93,7 +118,16 @@ export interface Scene {
 }
 
 /** What a command can do with its arguments. */
+/** How a construction's helper is drawn: its label, thin (a construction line), dashed. */
+export interface DrawLook {
+  label?: string;
+  thin?: boolean;
+  dashed?: boolean;
+}
+
 export interface Ctx {
+  /** Draws a helper of a construction (a leg, a linking line, a point), besides what the command returns. */
+  draw(shape: Shape, look?: DrawLook): void;
   val(e: Expr): Val;
   num(e: Expr): number;
   /** A point: A, (1, 2), Midpoint(A, B). */

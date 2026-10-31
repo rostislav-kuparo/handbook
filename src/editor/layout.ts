@@ -1,3 +1,5 @@
+import { romanize } from '../blank/roman';
+import { hasGlyph } from '../engine/handwriting';
 import type { DocContent } from '../model/types';
 import { SCRIPT_SCALE, SCRIPT_SHIFT, type ScriptKind } from './marks';
 
@@ -73,6 +75,11 @@ export class InkPalette {
 }
 
 /** Text of a paragraph with the size factor, colour index and raise of every character (code point). */
+/**
+ * A paragraph's text as the engine writes it: Roman numerals (I, II, IV
+ * чверті) become numerals — the hand's own (Ⅰ, Ⅴ… from «Почерк») or sticks;
+ * the same number of characters, so line breaks stay where they were.
+ */
 export function paragraphRuns(
   node: PMNodeJSON,
   palette: InkPalette,
@@ -96,5 +103,5 @@ export function paragraphRuns(
       shifts.push(shift);
     }
   }
-  return { text, scales, colors, shifts };
+  return { text: romanize(text, [], hasGlyph), scales, colors, shifts };
 }

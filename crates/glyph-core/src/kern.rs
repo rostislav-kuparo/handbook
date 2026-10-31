@@ -51,6 +51,14 @@ impl Profile {
         p
     }
 
+    /// Adds the ink of another profile of the same glyph.
+    pub fn merge(&mut self, other: &Profile) {
+        for i in 0..BANDS {
+            self.left[i] = self.left[i].min(other.left[i]);
+            self.right[i] = self.right[i].max(other.right[i]);
+        }
+    }
+
     /// Profile of centre lines drawn with a pen of `radius`, shifted by `dx` and
     /// scaled by `scale` around x = 0 (a cheap stand-in for the outline).
     pub fn of_strokes(strokes: &[Stroke], radius: f64, dx: f64, scale: f64) -> Profile {

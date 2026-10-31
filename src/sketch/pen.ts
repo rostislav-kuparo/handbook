@@ -14,6 +14,12 @@ export interface Pen {
   wobble?: number;
   /** Factor on how far straight lines run past their ends (default 1). */
   overshoot?: number;
+  /** Big circles and arcs are drawn with compasses (always so on a blank). */
+  compass?: boolean;
+  /** Factor on how unevenly points are drawn: 0 — all alike (default 1). */
+  points?: number;
+  /** Factor on how differently lines meet open points: 0 — exactly at the ring (default 1). */
+  joins?: number;
 }
 
 export type Rand = () => number;
@@ -193,15 +199,25 @@ export function dashes(center: Vec[], style: number, unit: number): Vec[][] {
   return out;
 }
 
-/** A dot of ink: a slightly uneven blob. */
-export function dot(c: Vec, radius: number, r: Rand): string {
+/**
+ * A dot of ink: a slightly uneven blob; `stretch` draws it out along a
+ * direction (radians) by a factor, as a pen pulled a little as it is lifted.
+ */
+export function dot(c: Vec, radius: number, r: Rand, stretch?: { angle: number; by: number }): string {
   const n = 9;
   const pts: Vec[] = [];
   const turn = r() * Math.PI * 2;
   for (let i = 0; i < n; i++) {
     const a = turn + (2 * Math.PI * i) / n;
     const rr = radius * (0.9 + r() * 0.2);
-    pts.push({ x: c.x + Math.cos(a) * rr, y: c.y + Math.sin(a) * rr });
+    let v = { x: Math.cos(a) * rr, y: Math.sin(a) * rr };
+    if (stretch) {
+      const [cs, sn] = [Math.cos(stretch.angle), Math.sin(stretch.angle)];
+      const along = (v.x * cs + v.y * sn) * stretch.by;
+      const across = -v.x * sn + v.y * cs;
+      v = { x: along * cs - across * sn, y: along * sn + across * cs };
+    }
+    pts.push({ x: c.x + v.x, y: c.y + v.y });
   }
   const midOf = (p: Vec, q: Vec) => ({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 });
   const start = midOf(pts[n - 1], pts[0]);
@@ -213,8 +229,12 @@ export function dot(c: Vec, radius: number, r: Rand): string {
   return d + 'Z';
 }
 
-/** Hatching inside a closed polygon: parallel lines `gap` px apart at `angle`. */
-export function hatch(poly: Vec[], gap: number, angle: number): [Vec, Vec][] {
+/**
+ * Hatching inside a closed polygon: parallel lines `gap` px apart at `angle`.
+ * With `r` they are drawn by hand: the spacing breathes by ±12 % and each
+ * line turns by up to ±1.5° about its middle.
+ */
+export function hatch(poly: Vec[], gap: number, angle: number, r?: Rand): [Vec, Vec][] {
   const c = Math.cos(angle);
   const s = Math.sin(angle);
   // Rotate so the hatch lines are horizontal, cut, rotate back.
@@ -223,7 +243,8 @@ export function hatch(poly: Vec[], gap: number, angle: number): [Vec, Vec][] {
   const lo = Math.min(...ys);
   const hi = Math.max(...ys);
   const out: [Vec, Vec][] = [];
-  for (let y = lo + gap / 2; y < hi; y += gap) {
+  const back = (x: number, y: number): Vec => ({ x: x * c - y * s, y: x * s + y * c });
+  for (let y = lo + gap * (r ? 0.3 + 0.4 * r() : 0.5); y < hi; y += gap * (r ? 0.88 + 0.24 * r() : 1)) {
     const xs: number[] = [];
     for (let i = 0; i < rot.length; i++) {
       const a = rot[i];
@@ -232,8 +253,16 @@ export function hatch(poly: Vec[], gap: number, angle: number): [Vec, Vec][] {
     }
     xs.sort((p, q) => p - q);
     for (let i = 0; i + 1 < xs.length; i += 2) {
-      const back = (x: number): Vec => ({ x: x * c - y * s, y: x * s + y * c });
-      out.push([back(xs[i]), back(xs[i + 1])]);
+      let p = back(xs[i], y);
+      let q = back(xs[i + 1], y);
+      if (r) {
+        const t = ((r() - 0.5) * 3 * Math.PI) / 180;
+        const m = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+        const turn = (v: Vec): Vec => ({ x: m.x + (v.x - m.x) * Math.cos(t) - (v.y - m.y) * Math.sin(t), y: m.y + (v.x - m.x) * Math.sin(t) + (v.y - m.y) * Math.cos(t) });
+        p = turn(p);
+        q = turn(q);
+      }
+      out.push([p, q]);
     }
   }
   return out;

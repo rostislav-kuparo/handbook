@@ -1,18 +1,85 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { PageExport } from '../editor/exporters';
+import { mix32, type PageExport } from '../editor/exporters';
+import { docSeed } from '../editor/layout';
+import { printerLook } from '../blank/printer';
+import { reliefOf } from '../wear/relief';
+import { saveWear, useWear } from '../wear/settings';
+import type { PrinterKind } from '../wear/wear';
 import { MM, SHEET_KINDS, type PageSetup, type PaperStyle, type SheetKind } from '../editor/page';
 import { LINE_HEIGHT_EM } from '../editor/layout';
 import { getHandwriting } from '../engine/handwriting';
-import { getSetting, setSetting } from '../storage/db';
-import { safeFilename, saveFile } from '../util/download';
+import { printShrinkOf, type Blank } from '../blank/blank';
+import { DEFAULT_PRINT, printChoice, tonerRaster, uprightTurn, type PrintChoice } from '../blank/print';
+import { db, getSetting, setSetting } from '../storage/db';
+import { exportFolder, safeFilename, saveFile } from '../util/download';
 import { useLive } from '../util/useLive';
-import { Analyzer, NO_MARGINS, type Margins, type Measure, type ObjectMask, type Ruling, type Specular } from './analysis';
+import { Analyzer, marginLines, NO_MARGINS, type HandMargins, type Margins, type Measure, type ObjectMask, type Ruling, type Specular, type Tilt } from './analysis';
 import { CornerEditor } from './CornerEditor';
-import { DEFAULT_PHOTO_LOOK, DeskRenderer, type InkLook, type PenKind, type PhotoLook } from './compose';
-import { deleteDesk, listDesks, openDesk, saveDesk, type DeskBend, type DeskFormat, type SavedDesk } from './desks';
-import { isConvexClockwise, type Pt } from './homography';
+import { Hint, PhotoStrip, Pill, SavedThumb, Section, Shutter, Toasts, Tool, type Message } from './DeskParts';
 import {
+  ActualIcon,
+  AgainIcon,
+  BrushIcon,
+  ClearIcon,
+  CloseIcon,
+  CurveIcon,
+  DotIcon,
+  EraseIcon,
+  FindSheetIcon,
+  MarginsIcon,
+  PipetteIcon,
+  RotatePhotoIcon,
+  ScanIcon,
+  TurnIcon,
+} from '../ui/icons';
+import {
+  anglesOf,
+  cameraCorners,
+  captureOf,
+  completeCorners,
+  coverCorners,
+  DEFAULT_CAPTURE,
+  describeTilt,
+  fillsFrame,
+  FLAT_TILT,
+  focalPx,
+  inPlaneOf,
+  lensOf,
+  lightFrom,
+  lightSpread,
+  madeUpAngles,
+  rotOf,
+  scannerLook,
+  sidesBeyond,
+  startLines,
+  SURE_TILT,
+  tiltOf,
+  turnByLines,
+  wavesOf,
+  type Angles,
+  type Capture,
+} from './camera';
+import { DEFAULT_PHOTO_LOOK, DeskRenderer, STAGES, type InkLook, type PenKind, type PhotoLook, type Stage } from './compose';
+import { DEFAULT_LOOK, DEFAULT_SHEET } from './deskFormat';
+import {
+  deleteDesk,
+  jpeg,
+  listDesks,
+  openDesk,
+  writeDesk,
+  type DeskBend,
+  type DeskFormat,
+  type DeskPhotoRow,
+  type DeskSettings,
+  type SavedDesk,
+  type SavedLook,
+  type SavedPhoto,
+  type SheetChoice,
+} from './desks';
+import { isConvexClockwise, type Mat3, type Pt } from './homography';
+import {
+  blankLayout,
   inkLayout,
   isA4,
   linesOf,
@@ -25,7 +92,6 @@ import {
   rasterize,
   rasterizePen,
   rasterScale,
-  type FitMode,
   type InkLayout,
 } from './inkLayer';
 import { MaskEditor, type Brush, type MaskTool } from './MaskEditor';
@@ -34,27 +100,11 @@ import { GRID_NX, GRID_NY, zeroGrid, type Warp } from './warp';
 
 const LOOK_KEY = 'desk.ink';
 const SHEET_KEY = 'desk.sheet';
-/** What of the look is remembered between photos. */
-type SavedLook = Pick<InkLook, 'pen' | 'density' | 'grain' | 'texture'>;
-const DEFAULT_LOOK: SavedLook = { pen: 'ballpoint', density: 0.35, grain: 1, texture: 1 };
+const PRINT_KEY = 'desk.print';
+const CAPTURE_KEY = 'desk.capture';
 /** Blur when a photo's edges tell nothing. */
 const FALLBACK_BLUR = 0.7;
 
-interface SheetChoice {
-  kind: DeskFormat;
-  /** The size of «свой» format, mm. */
-  custom: [number, number];
-  /** On squared paper the size is read off the squares (5 mm each), whatever the format. */
-  byGrid: boolean;
-  paper: PaperStyle;
-  mode: FitMode;
-  /** Printed lines per line of text and the letters' size; null: as fits best. */
-  every: number | null;
-  letters: number | null;
-  /** On squares, drawings by them. */
-  squares: boolean;
-}
-const DEFAULT_SHEET: SheetChoice = { kind: 'a4', custom: [210, 297], byGrid: true, paper: 'plain', mode: 'document', every: null, letters: null, squares: true };
 /** Version of the remembered choice: before 2 «подогнать под лист» was the default and is not kept. */
 const SHEET_VERSION = 2;
 
@@ -95,13 +145,11 @@ interface Desk {
   touched: boolean;
   /** A curved sheet: the bow of its sides and the grid of corrections; null — flat. */
   bend: DeskBend | null;
-  /** Where it is kept in «Мои столы». */
-  savedId: string | null;
   /** The paper's size read off its squares, mm, and the shape and format it was read for. */
   gridSize: [number, number] | null;
   gridKey: string | null;
-  /** Margin lines moved by hand, mm; null — as found. */
-  margins: Margins | null;
+  /** Margin lines moved by hand, mm (by one number when kept before lines had ends); null — as found. */
+  margins: HandMargins | Margins | null;
   /** Results and the corners (and paper) they belong to. */
   ruling: Ruling | null;
   rulingKey: string | null;
@@ -110,6 +158,14 @@ interface Desk {
   measure: Measure | null;
   glare: Specular | null;
   measureKey: string | null;
+  /** The lens's 35 mm equivalent focal length (EXIF), mm; null: unknown. */
+  focal35: number | null;
+  /** How the phone was held, by the photo's lines (null: they do not tell); undefined: not looked for yet. */
+  tilt: Tilt | null | undefined;
+  /** The camera's turn set by hand (a sheet filling the frame on a blank); null: as found or made up. */
+  handTilt: Angles | null;
+  /** The lines it was set by (two across the sheet, two down it), when it was: [ax, ay, bx, by]. */
+  handLines: number[][] | null;
 }
 
 /** A sheet-shaped frame in the middle of the photo, to be dragged onto the real corners. */
@@ -130,6 +186,7 @@ function startCorners(photo: Photo, [w, h]: [number, number]): Pt[] {
 }
 
 const dist = (a: Pt, b: Pt) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+const quadArea = (q: Pt[]) => Math.abs(q.reduce((s, p, k) => s + p[0] * q[(k + 1) % q.length][1] - q[(k + 1) % q.length][0] * p[1], 0)) / 2;
 
 /** The marked top edge looks like a long side while the sheet is upright: the top is probably set wrong. */
 function topLooksSideways(c: Pt[], [w, h]: [number, number]): boolean {
@@ -166,8 +223,22 @@ function sizeBySquares(fmt: [number, number], r: Ruling): [number, number] | nul
 }
 
 /** The paper of a desk: as its squares say, or the chosen format. */
-function paperOf(d: Pick<Desk, 'corners' | 'bend' | 'gridSize' | 'gridKey'>, sheet: SheetChoice): [number, number] {
-  const fmt = formatMm(sheet);
+/** The marked top edge is the longer one: the sheet lies on its side. */
+function topIsLong(c: Pt[]): boolean {
+  const across = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2;
+  const along = (dist(c[1], c[2]) + dist(c[0], c[3])) / 2;
+  return across > along * 1.05;
+}
+
+/**
+ * The real sheet's size, mm, as it lies in the photo: the format, on its side
+ * when chosen so (or, `byCorners`, when its corners show it so); on squared
+ * paper read off the squares.
+ */
+function paperOf(d: Pick<Desk, 'corners' | 'bend' | 'gridSize' | 'gridKey'>, sheet: SheetChoice, byCorners = false): [number, number] {
+  const upright = formatMm(sheet);
+  const side = sheet.orient === 'landscape' || (sheet.orient !== 'portrait' && byCorners && topIsLong(d.corners));
+  const fmt: [number, number] = side ? [Math.max(...upright), Math.min(...upright)] : upright;
   return sheet.byGrid && d.gridSize && d.gridKey === rulingKeyOf(d, fmt) ? d.gridSize : fmt;
 }
 
@@ -199,30 +270,6 @@ function formatHint(r: Ruling, paperMm: [number, number], byGrid: boolean): stri
   return null;
 }
 
-/** A small picture of a photo for the list. */
-function Thumb({ photo }: { photo: Photo }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const c = ref.current;
-    if (!c) return;
-    const k = 96 / Math.max(photo.width, photo.height);
-    c.width = Math.round(photo.width * k);
-    c.height = Math.round(photo.height * k);
-    c.getContext('2d')!.drawImage(photo.bitmap, 0, 0, c.width, c.height);
-  }, [photo]);
-  return <canvas ref={ref} className="desk-thumb" />;
-}
-
-function SavedThumb({ blob }: { blob: Blob }) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    const u = URL.createObjectURL(blob);
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [blob]);
-  return url ? <img src={url} className="desk-thumb" alt="" /> : <span className="desk-thumb" />;
-}
-
 interface Props {
   /** The open document, as the page export draws it. */
   base: PageExport;
@@ -236,7 +283,15 @@ interface Props {
  */
 export function DeskDialog(props: Props) {
   // The document cannot change while the dialog is open: keep what it was opened with.
-  const [base] = useState(props.base);
+  const [opened] = useState(props.base);
+  // The traces of work and the printer are the render's settings: they may change while it is open.
+  const wear = useWear();
+  const tracesKey = JSON.stringify([wear.on, wear.smudge, wear.size, wear.erasers, wear.hand, wear.holes, wear.depth, wear.seed]);
+  const base = useMemo(() => ({ ...opened, wear }), [opened, tracesKey]);
+  const reliefKey = JSON.stringify([wear.on, wear.folds, wear.sharp, wear.hand, wear.holes, wear.depth, wear.seed, wear.show.folds, wear.show.wear]);
+  /** What the result shows: the render up to this stage; and what the shutter shows on its left. */
+  const [stage, setStage] = useState<Stage>('all');
+  const [leftStage, setLeftStage] = useState<Stage>('photo');
   const [setup] = useState(props.setup);
   const { onClose } = props;
   const [step, setStep] = useState(0);
@@ -248,6 +303,17 @@ export function DeskDialog(props: Props) {
   const [blurGain, setBlurGain] = useState(1);
   const [split, setSplit] = useState(0);
   const [calib, setCalib] = useState<{ t: number[]; mm: number } | null>(null);
+  /** A document on a blank: the blank, printed onto the photographed sheet before the ink, and how. */
+  const blankId = base.blank?.id ?? null;
+  const [blankRow, setBlankRow] = useState<Blank | null>(null);
+  const [print, setPrint] = useState<PrintChoice>(DEFAULT_PRINT);
+  /** How the photo is taken as: a photo (a made-up camera when the sheet fills the frame), or a scanner app's page. */
+  const [capture, setCapture] = useState<Capture>(DEFAULT_CAPTURE);
+  /** Per photo: how unevenly its paper is lit, and its scanner look (made once). */
+  const spreads = useRef(new Map<string, number>());
+  const scans = useRef(new Map<string, Promise<Photo>>());
+  /** Per photo: the search for how the phone was held, while it runs. */
+  const tilts = useRef(new Map<string, Promise<Tilt | null>>());
   /** Which photo each sheet of the document goes onto: all onto the selected one, or each its own. */
   const [assign, setAssign] = useState<'one' | 'each'>('one');
   const [pageDesk, setPageDesk] = useState<Record<number, string>>({});
@@ -259,12 +325,32 @@ export function DeskDialog(props: Props) {
   const [note, setNote] = useState<string | null>(null);
   /** What the search for the sheet said, per photo. */
   const [foundNote, setFoundNote] = useState<Record<string, string>>({});
+  /** The found lines over the photo (step 1). */
+  const [showLines, setShowLines] = useState(false);
+  /** Lines being put along a photo's sheet by hand, to read the perspective off. */
+  const [guides, setGuides] = useState<{ id: string; lines: number[][] } | null>(null);
   const [actual, setActual] = useState(false);
   const [drop, setDrop] = useState(false);
   const [picking, setPicking] = useState(false);
   const [brush, setBrush] = useState<Brush>('erase');
   const [tool, setTool] = useState<MaskTool>('brush');
   const [brushRadius, setBrushRadius] = useState(40);
+  /** Messages closed (or faded) by now. */
+  const [gone, setGone] = useState<string[]>([]);
+  /** The desk in «Мои столы» this export is kept as (from then on it saves itself), and its name. */
+  const [deskId, setDeskId] = useState<string | null>(null);
+  const [deskName, setDeskName] = useState('');
+  const [saving, setSaving] = useState(false);
+  /** The photos' JPEGs as kept, the masks last written, and the gallery's picture (and which photo it is of). */
+  const blobs = useRef(new Map<string, Blob>());
+  const written = useRef(new Map<string, ObjectMask | null>());
+  const thumb = useRef<{ id: string; blob: Blob } | null>(null);
+  /** Saves run one after another; `dirty`: a change not written yet. */
+  const saveChain = useRef(Promise.resolve());
+  const dirty = useRef(false);
+  /** The settings as they are now, for a save that runs later. */
+  const settingsRef = useRef({ sheet, look, blurGain, calib, assign, pageDesk, page, step, curId, deskName, print, capture });
+  settingsRef.current = { sheet, look, blurGain, calib, assign, pageDesk, page, step, curId, deskName, print, capture };
   const saved = useLive(listDesks, [], [] as SavedDesk[]);
   const fileRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -283,15 +369,24 @@ export function DeskDialog(props: Props) {
   const [inkReady, setInkReady] = useState(0);
 
   const cur = desks.find((d) => d.id === curId) ?? desks[0] ?? null;
+  // On a blank the paper is plain: what is printed on it is the blank.
+  const paperKind: PaperStyle = blankId ? 'plain' : sheet.paper;
   const valid = !!cur && isConvexClockwise(cur.corners);
   const allValid = desks.length > 0 && desks.every((d) => isConvexClockwise(d.corners));
-  const paperFor = (d: Desk) => paperOf(d, sheet);
+  // A clean sheet for a blank lies as its corners show; a sheet to write on, as chosen.
+  const paperFor = (d: Desk) => paperOf(d, sheet, !!blankId);
   const hasRuling = (d: Desk) => d.rulingKey === rulingKeyOf(d, paperFor(d));
-  /** The margin lines of a desk: moved by hand, or as found. */
-  const marginsOf = (d: Desk): Margins => d.margins ?? (hasRuling(d) ? d.ruling?.margins : null) ?? NO_MARGINS;
+  /** The margin lines of a desk by their ends: moved by hand, or as found (leaning with the printed lines). */
+  const marginsOf = (d: Desk): HandMargins => {
+    const r = hasRuling(d) ? d.ruling : null;
+    return marginLines(d.margins ?? r?.margins ?? NO_MARGINS, r?.slope ?? 0, paperFor(d));
+  };
 
   useEffect(() => {
     void getSetting<Partial<SavedLook>>(LOOK_KEY, {}).then((l) => setLook((c) => ({ ...c, ...l })));
+    void getSetting<unknown>(PRINT_KEY, null).then((p) => setPrint(printChoice(p)));
+    void getSetting<unknown>(CAPTURE_KEY, null).then((c) => setCapture(captureOf(c)));
+    if (blankId) void db.blanks.get(blankId).then((b) => setBlankRow(b ?? null));
     void getSetting<SheetChoice & { v?: number }>(SHEET_KEY, DEFAULT_SHEET).then(({ v, mode, ...s }) =>
       setSheet({ ...DEFAULT_SHEET, ...s, ...(v === SHEET_VERSION ? { mode } : {}) }),
     );
@@ -314,17 +409,127 @@ export function DeskDialog(props: Props) {
     setSheet(next);
     void setSetting(SHEET_KEY, { ...next, v: SHEET_VERSION });
   };
+  const changeCapture = (patch: Partial<Capture>) => {
+    const next = { ...capture, ...patch };
+    setCapture(next);
+    void setSetting(CAPTURE_KEY, next);
+  };
+  const changePrint = (patch: Partial<PrintChoice>) => {
+    const next = { ...print, ...patch };
+    setPrint(next);
+    void setSetting(PRINT_KEY, next);
+  };
   const patch = (id: string, p: Partial<Desk>) => setDesks((ds) => ds.map((d) => (d.id === id ? { ...d, ...p } : d)));
+
+  /** A name for a new desk: its photo's, or the date for several. */
+  const defaultName = (ds: Desk[]) =>
+    ds.length === 1 ? ds[0].name : `Стол от ${new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}`;
+
+  /** Writes this export as desk `id`: markup, findings and settings, and the photos not written yet or with a new mask. */
+  const writeNow = async (id: string) => {
+    const ds = desksRef.current;
+    const st = settingsRef.current;
+    if (!ds.length) return;
+    const rows: DeskPhotoRow[] = [];
+    for (const d of ds) {
+      if (written.current.has(d.id) && written.current.get(d.id) === d.mask) continue;
+      let blob = blobs.current.get(d.id);
+      if (!blob) {
+        blob = await jpeg(d.photo, d.photo.width, 0.92);
+        blobs.current.set(d.id, blob);
+      }
+      rows.push({ id: d.id, deskId: id, photo: blob, mask: d.mask });
+    }
+    if (thumb.current?.id !== ds[0].id) thumb.current = { id: ds[0].id, blob: await jpeg(ds[0].photo, 320, 0.8) };
+    const index = (photoId: string | null | undefined) => Math.max(0, ds.findIndex((d) => d.id === photoId));
+    const photos: SavedPhoto[] = ds.map((d) => ({
+      id: d.id,
+      name: d.name,
+      corners: d.corners,
+      snapped: d.snapped,
+      bend: d.bend,
+      margins: d.margins,
+      maskKey: d.maskKey,
+      focal35: d.focal35,
+      handTilt: d.handTilt,
+      handLines: d.handLines,
+      found: {
+        ruling: d.ruling,
+        rulingKey: d.rulingKey,
+        gridSize: d.gridSize,
+        gridKey: d.gridKey,
+        measure: d.measure,
+        glare: d.glare,
+        measureKey: d.measureKey,
+        ...(d.tilt !== undefined && { tilt: d.tilt }),
+      },
+    }));
+    const settings: DeskSettings = {
+      sheet: st.sheet,
+      look: st.look,
+      blurGain: st.blurGain,
+      calib: st.calib,
+      assign: st.assign,
+      pageDesk: Object.fromEntries(Object.entries(st.pageDesk).map(([p, photoId]) => [p, index(photoId)])),
+      current: index(st.curId),
+      page: st.page,
+      step: st.step,
+      print: st.print,
+      capture: st.capture,
+    };
+    const now = Date.now();
+    await writeDesk({ id, name: st.deskName.trim() || defaultName(ds), thumb: thumb.current.blob, photos, settings, createdAt: now, updatedAt: now }, rows);
+    for (const r of rows) written.current.set(r.id, r.mask);
+  };
+
+  /** Writes what changed, after any save still running. */
+  const flush = (id: string) => {
+    dirty.current = false;
+    setSaving(true);
+    const run = saveChain.current.then(() => writeNow(id));
+    saveChain.current = run.catch(() => undefined);
+    return run
+      .catch((err) => setError(`Стол не сохранился: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => !dirty.current && setSaving(false));
+  };
+  /** Everything of the kept desk written. */
+  const settle = async () => {
+    if (deskId && dirty.current) await flush(deskId);
+    else await saveChain.current;
+  };
+
+  // A kept desk saves itself a second after the last change.
+  useEffect(() => {
+    if (!deskId) return;
+    dirty.current = true;
+    setSaving(true);
+    const t = setTimeout(() => void flush(deskId), 1000);
+    return () => clearTimeout(t);
+  }, [deskId, desks, sheet, look, blurGain, calib, assign, pageDesk, page, step, curId, deskName, print, capture]);
+
+  /** Keeps this export in «Мои столы». */
+  const keepDesk = () => {
+    const id = crypto.randomUUID();
+    setDeskName(defaultName(desks));
+    setDeskId(id);
+    void flush(id);
+  };
+
+  const close = async () => {
+    setBusy('Сохраняю стол…');
+    await settle();
+    onClose();
+  };
 
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (picking) setPicking(false);
-      else onClose();
+      else void close();
     };
     document.addEventListener('keydown', esc);
     return () => document.removeEventListener('keydown', esc);
-  }, [onClose, picking]);
+  }, [onClose, picking, deskId]);
 
   /** The analysis, looking at this desk's photo. */
   const analysisOf = async (d: Desk) => {
@@ -341,17 +546,101 @@ export function DeskDialog(props: Props) {
     return { corners: c.corners, snapped: c.fitted, bend: { bulge: c.bulge, grid: zeroGrid(), fixed: false, max: c.max } };
   };
 
+  /** The lens's focal length for a desk's photo, px. */
+  const focalOf = (d: Desk) => focalPx(d.photo.width, d.photo.height, d.focal35);
+  /** A found tilt sure enough, and not a sheet square to the camera. */
+  const sureTilt = (t: Tilt | null | undefined): t is Tilt => !!t && t.confidence >= SURE_TILT && tiltOf(t.rot) >= FLAT_TILT;
+  /** Reads how the phone was held off the photo's lines (once per photo) and keeps it. */
+  const lookForTilt = (d: Desk): Promise<Tilt | null> => {
+    const known = desksRef.current.find((x) => x.id === d.id)?.tilt;
+    if (known !== undefined) return Promise.resolve(known);
+    let job = tilts.current.get(d.id);
+    if (!job) {
+      job = analysisOf(d)
+        .then((a) => a.perspective(focalOf(d)))
+        .catch(() => null)
+        .then((tilt) => {
+          patch(d.id, { tilt });
+          return tilt;
+        });
+      tilts.current.set(d.id, job);
+    }
+    return job;
+  };
+
+  /**
+   * A sheet partly or wholly beyond the frame, in the perspective `turn`:
+   * its corners outside the frame drawn anew (all of them for a sheet filling
+   * the frame). Null when its edges are all in the photo — the corners tell
+   * the perspective then — or the turn does not fit it.
+   */
+  const refitCorners = (d: Desk, turn: Mat3): Pt[] | null => {
+    const { width: w, height: h } = d.photo;
+    const beyond = sidesBeyond(d.corners, d.snapped, w, h);
+    if (beyond.every(Boolean)) return coverCorners(turn, w, h, focalOf(d));
+    if (beyond.some(Boolean)) return completeCorners(d.corners, d.snapped, turn, w, h, focalOf(d), paperFor(d));
+    return null;
+  };
+  /** Sets the camera's turn by hand (null: as found), and the lines it was read off; a notebook's corners beyond the frame follow it. */
+  const setHandTilt = (d: Desk, a: Angles | null, lines: number[][] | null = null) => {
+    const now = desksRef.current.find((x) => x.id === d.id) ?? d;
+    const turn = a ? rotOf(a) : sureTilt(now.tilt) ? now.tilt.rot : null;
+    const corners = turn && !blankId ? refitCorners(now, turn) : null;
+    patch(d.id, { handTilt: a, handLines: a ? lines : null, ...(corners && { corners, bend: null }) });
+  };
+  /** The perspective read off lines put along the sheet by hand. */
+  const applyLines = (d: Desk, lines: number[][]) => {
+    const turn = turnByLines(lines, d.photo.width, d.photo.height, focalOf(d));
+    if (!turn) {
+      setFoundNote((n) => ({ ...n, [d.id]: 'Линии не сходятся так, как на листе: розовые положите вдоль строк или верхнего края, голубые — вдоль полей или боковых краёв.' }));
+      return;
+    }
+    setHandTilt(d, anglesOf(turn), lines);
+    setFoundNote((n) => ({ ...n, [d.id]: `Перспектива по линиям: ${describeTilt(anglesOf(turn))}.` }));
+  };
+
   /** Looks for the sheet and puts the corners on it (unless the user already moved them). */
   const findSheet = async (d: Desk, force: boolean) => {
     const say = (text: string) => setFoundNote((n) => ({ ...n, [d.id]: text }));
     try {
-      const found = await (await analysisOf(d)).findSheet();
+      const a = await analysisOf(d);
+      const found = await a.findSheet();
+      const tilt = await lookForTilt(d);
       const now = desksRef.current.find((x) => x.id === d.id);
       if (!now || (!force && now.touched)) return;
-      if (found?.scan) {
+      // The sheet fills the frame, but its lines converge: photographed close, not scanned — its corners lie
+      // outside the frame. (On a blank the camera takes the tilt instead: the printing must stay in the frame.)
+      // A bright patch the light made, not the sheet: most of the frame, but out of the plane the lines show.
+      const patchy =
+        !!found &&
+        !found.scan &&
+        sureTilt(tilt) &&
+        tilt.by === 'two' &&
+        quadArea(found.corners) > 0.5 * d.photo.width * d.photo.height &&
+        !inPlaneOf(found.corners, tilt.rot, d.photo.width, d.photo.height, focalOf(d));
+      const full = !!found && (found.scan || patchy || fillsFrame(found.corners, d.photo.width, d.photo.height));
+      const cover = full && !blankId && sureTilt(tilt) ? coverCorners(tilt.rot, d.photo.width, d.photo.height, focalOf(d)) : null;
+      if (cover) {
+        patch(d.id, { corners: cover, snapped: NONE, bend: null });
+        say(`Лист во весь кадр, перспектива найдена по линиям на снимке: ${describeTilt(anglesOf(tilt!.rot))}. Уголки — за краями кадра.`);
+      } else if (found?.scan) {
         patch(d.id, { corners: found.corners, snapped: found.snapped, bend: null });
         say('Это скан: лист занимает весь кадр — без перспективы и изгиба.');
+      } else if (patchy) {
+        patch(d.id, { corners: frameOf(d.photo), snapped: NONE, bend: null });
+        say(`Края листа не видны — он во весь кадр; перспектива найдена по линиям на снимке: ${describeTilt(anglesOf(tilt!.rot))}.`);
       } else if (found && found.confidence >= 0.6) {
+        // Part of the sheet beyond the frame: its corners there drawn by the lines' perspective.
+        const beyond = sidesBeyond(found.corners, found.snapped, d.photo.width, d.photo.height);
+        const done =
+          !blankId && sureTilt(tilt) && beyond.some(Boolean)
+            ? completeCorners(found.corners, found.snapped, tilt.rot, d.photo.width, d.photo.height, focalOf(d), paperFor(now))
+            : null;
+        if (done) {
+          patch(d.id, { corners: done, snapped: found.snapped, bend: null });
+          say(`Лист виден не весь: уголки за краями кадра достроены по перспективе снимка (${describeTilt(anglesOf(tilt!.rot))}). Проверьте видимые уголки в лупе.`);
+          return;
+        }
         const curved = await curve(d, found.corners, false).catch(() => null);
         const again = desksRef.current.find((x) => x.id === d.id);
         if (!again || (!force && again.touched)) return;
@@ -380,7 +669,6 @@ export function DeskDialog(props: Props) {
     snapped: NONE,
     touched: false,
     bend: null,
-    savedId: null,
     gridSize: null,
     gridKey: null,
     margins: null,
@@ -391,7 +679,36 @@ export function DeskDialog(props: Props) {
     measure: null,
     glare: null,
     measureKey: null,
+    focal35: photo.focal35 ?? null,
+    tilt: undefined,
+    handTilt: null,
+    handLines: null,
   });
+
+  /** The photo turned a quarter clockwise (a scan or a photo that came on its side): a new photo in its place, its sheet found anew. */
+  const rotatePhoto = async (d: Desk) => {
+    setBusy('Поворачиваю снимок…');
+    try {
+      const { width: w, height: h } = d.photo;
+      const canvas = new OffscreenCanvas(h, w);
+      const ctx = canvas.getContext('2d')!;
+      ctx.translate(h, 0);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(d.photo.bitmap, 0, 0);
+      const photo: Photo = { bitmap: await createImageBitmap(canvas), width: h, height: w, name: d.photo.name };
+      const next = { ...fresh(photo, d.name), focal35: d.focal35 };
+      setDesks((ds) => ds.map((x) => (x.id === d.id ? next : x)));
+      setPageDesk((pd) => Object.fromEntries(Object.entries(pd).map(([p, id]) => [p, id === d.id ? next.id : id])));
+      setCurId(next.id);
+      d.photo.bitmap.close();
+      setBusy('Ищу лист на фото…');
+      await findSheet(next, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const addFiles = async (files: File[]) => {
     setError(null);
@@ -418,26 +735,82 @@ export function DeskDialog(props: Props) {
     setBusy(null);
   };
 
+  /** A photo of a saved desk, with its markup and what was found on it. */
+  const deskOf = (p: SavedPhoto, photo: Photo, mask: ObjectMask | null): Desk => ({
+    ...fresh(photo, p.name),
+    ...p.found,
+    id: p.id,
+    corners: p.corners,
+    snapped: p.snapped,
+    bend: p.bend,
+    touched: true,
+    margins: p.margins,
+    mask,
+    maskKey: mask ? p.maskKey : null,
+    focal35: p.focal35 ?? null,
+    tilt: p.found?.tilt,
+    handTilt: p.handTilt ?? null,
+    handLines: p.handLines ?? null,
+  });
+
+  /** Opens a desk from «Мои столы» instead of the photos here: its photos, markup and settings as they were saved. */
   const openSaved = async (s: SavedDesk) => {
+    if (s.id === deskId) return;
+    if (!deskId && desks.length && !confirm('Фото этого экспорта не сохранены в «Мои столы». Открыть стол вместо них?')) return;
+    setError(null);
     setBusy('Открываю стол…');
     try {
-      const photo = await openDesk(s);
-      const d: Desk = {
-        ...fresh(photo, s.name),
-        corners: s.corners,
-        snapped: s.snapped,
-        bend: s.bend ?? null,
-        touched: true,
-        savedId: s.id,
-        margins: s.margins ?? null,
-        mask: s.mask,
-        maskKey: s.mask ? JSON.stringify(s.corners) : null,
-      };
-      setDesks((ds) => [...ds, d]);
-      if (desksRef.current.length > 0) setAssign('each');
-      changeSheet({ kind: s.kind, paper: s.paper, byGrid: s.byGrid ?? true, ...(s.custom ? { custom: s.custom } : {}) });
-      if (s.calib && !calib) setCalib({ t: s.calib, mm: 0 });
-      setCurId(d.id);
+      await settle();
+      const photos = await openDesk(s);
+      if (!photos.length) throw new Error('Фото этого стола не нашлись.');
+      const opened = photos.map(({ id, photo, blob, mask }) => {
+        blobs.current.set(id, blob);
+        written.current.set(id, mask);
+        return deskOf(s.photos.find((p) => p.id === id)!, photo, mask);
+      });
+      desksRef.current.forEach((d) => d.photo.bitmap.close());
+      shown.current = null;
+      setDesks(opened);
+      const st = s.settings;
+      setSheet(st.sheet);
+      setLook(st.look);
+      setBlurGain(st.blurGain);
+      setCalib(st.calib);
+      if (st.print) setPrint(printChoice(st.print));
+      if (st.capture) setCapture(captureOf(st.capture));
+      setAssign(st.assign);
+      setPageDesk(Object.fromEntries(Object.entries(st.pageDesk).flatMap(([p, i]) => (opened[i] ? [[p, opened[i].id]] : []))));
+      setCurId((opened[st.current] ?? opened[0]).id);
+      setPage(st.page);
+      setFoundNote({});
+      setNote(null);
+      thumb.current = { id: opened[0].id, blob: s.thumb };
+      dirty.current = false;
+      setDeskId(s.id);
+      setDeskName(s.name);
+      setStep(st.step);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Adds the photos of a saved desk, with their markup, to this export. */
+  const addSaved = async (s: SavedDesk) => {
+    setError(null);
+    setBusy('Открываю фото стола…');
+    try {
+      const added = (await openDesk(s)).map(({ id, photo, blob, mask }) => {
+        // A copy: the saved desk keeps its own.
+        const copy = { ...deskOf(s.photos.find((p) => p.id === id)!, photo, mask), id: crypto.randomUUID() };
+        blobs.current.set(copy.id, blob);
+        return copy;
+      });
+      if (!added.length) return;
+      setDesks((ds) => [...ds, ...added]);
+      if (desksRef.current.length + added.length > 1) setAssign('each');
+      setCurId(added[0].id);
       setStep(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -451,35 +824,6 @@ export function DeskDialog(props: Props) {
     if (shown.current === d.id) shown.current = null;
     d.photo.bitmap.close();
     if (curId === d.id) setCurId(null);
-  };
-
-  const keep = async (d: Desk) => {
-    setBusy('Сохраняю в «Мои столы»…');
-    try {
-      const id = await saveDesk(
-        d.photo,
-        {
-          name: d.name,
-          corners: d.corners,
-          snapped: d.snapped,
-          bend: d.bend,
-          kind: sheet.kind,
-          custom: sheet.custom,
-          byGrid: sheet.byGrid,
-          paper: sheet.paper,
-          margins: d.margins,
-          mask: d.mask,
-          calib: calib?.t ?? null,
-        },
-        d.savedId ?? undefined,
-      );
-      patch(d.id, { savedId: id });
-      setNote(d.savedId ? 'Стол обновлён в «Мои столы».' : 'Стол сохранён в «Мои столы»: его можно открыть снова на шаге «Фото».');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
   };
 
   /** A corner was let go at `at`: the two sides at it stick to the sheet's real edges. */
@@ -519,7 +863,7 @@ export function DeskDialog(props: Props) {
       Object.assign(p, { gridSize: r && sizeBySquares(fmt, r), gridKey: rulingKeyOf(d, fmt) });
     }
     // The paper as its squares say; the lines read again on it.
-    const size = paperOf({ ...d, ...p }, sheet);
+    const size = paperOf({ ...d, ...p }, sheet, !!blankId);
     const [wMm, hMm] = size;
     if (need.ruling && d.rulingKey !== rulingKeyOf(d, size)) {
       let r = await a.ruling(warpOf(d), wMm, hMm);
@@ -582,7 +926,7 @@ export function DeskDialog(props: Props) {
       for (const [i, d] of usedDesks.entries()) {
         if (!alive) return;
         setPreparing(usedDesks.length > 1 ? `Измеряю фото ${i + 1} из ${usedDesks.length}: резкость, шум, блики…` : 'Измеряю снимок: резкость, шум, блики…');
-        await prepare(d.id, { ruling: sheet.paper !== 'plain', mask: true, measure: true }).catch((err) => alive && setError(String(err)));
+        await prepare(d.id, { ruling: paperKind !== 'plain', mask: true, measure: true }).catch((err) => alive && setError(String(err)));
       }
       if (alive) setPreparing(null);
     })();
@@ -590,11 +934,11 @@ export function DeskDialog(props: Props) {
       alive = false;
       setPreparing(null);
     };
-  }, [step, usedKey, sizeKey(formatMm(sheet)), sheet.byGrid, sheet.paper]);
+  }, [step, usedKey, sizeKey(formatMm(sheet)), sheet.byGrid, paperKind]);
 
   // The lines the text is laid onto: those found on the first photo that has them, within its
   // margins, on its paper; the other photos' sheets follow their own lines.
-  const refDesk = sheet.paper !== 'plain' ? (desks.find((d) => d.ruling && hasRuling(d)) ?? null) : null;
+  const refDesk = paperKind !== 'plain' ? (desks.find((d) => d.ruling && hasRuling(d)) ?? null) : null;
   const refLines = refDesk?.ruling ? linesOf(refDesk.ruling, marginsOf(refDesk)) : null;
   const refKey = JSON.stringify(refLines);
   const paperMm = refDesk ? paperFor(refDesk) : cur ? paperFor(cur) : formatMm(sheet);
@@ -602,10 +946,15 @@ export function DeskDialog(props: Props) {
   const looseMargins = !refLines && cur ? marginsPx(marginsOf(cur)) : null;
   const looseKey = JSON.stringify(looseMargins);
   const paperKey = sizeKey(paperMm);
+  // A turned blank stands upright in the photo, unless its turn was chosen by hand.
+  const effectivePrint: PrintChoice = print.turnAuto && cur ? { ...print, turn: uprightTurn(cur.corners as [number, number][]) } : print;
   useEffect(() => {
     let alive = true;
     setLayout(null);
-    void inkLayout(base, setup, paperMm, sheet.mode, refLines, { every: sheet.every, letters: sheet.letters, squares: sheet.squares }, looseMargins)
+    void (blankId
+      ? blankLayout(base, paperMm, effectivePrint, blankRow ? printShrinkOf(blankRow, paperSize(paperMm)) : 1)
+      : inkLayout(base, setup, paperMm, sheet.mode, refLines, { every: sheet.every, letters: sheet.letters, squares: sheet.squares }, looseMargins)
+    )
       .then((l) => {
         if (!alive) return;
         setLayout(l);
@@ -615,7 +964,7 @@ export function DeskDialog(props: Props) {
     return () => {
       alive = false;
     };
-  }, [base, setup, paperKey, sheet.mode, sheet.every, sheet.letters, sheet.squares, refKey, looseKey]);
+  }, [base, setup, paperKey, sheet.mode, sheet.every, sheet.letters, sheet.squares, refKey, looseKey, effectivePrint.turn, print.skew, print.seed, blankRow?.print]);
 
   // The GPU canvas lives as long as the dialog.
   useEffect(() => {
@@ -640,7 +989,7 @@ export function DeskDialog(props: Props) {
 
   /** Effective look for a desk: the blur slider scales what the photo measured. */
   const lookFor = (d: Desk): InkLook => ({ ...look, blur: (d.measure?.sigma ?? FALLBACK_BLUR) * blurGain, split });
-  const linesFor = (d: Desk) => (sheet.paper !== 'plain' && d.ruling && hasRuling(d) ? linesOf(d.ruling, marginsOf(d)) : null);
+  const linesFor = (d: Desk) => (paperKind !== 'plain' && d.ruling && hasRuling(d) ? linesOf(d.ruling, marginsOf(d)) : null);
   /** Where the page goes on a desk's sheet: by its own lines on its own paper. */
   const onDesk = (d: Desk, l: InkLayout) => placeOn(l, linesFor(d), paperSize(paperFor(d)));
 
@@ -649,6 +998,44 @@ export function DeskDialog(props: Props) {
    * longer wanted (`wanted` false once its picture is ready) changes nothing:
    * a late one must not replace the newer ink.
    */
+  /**
+   * How the photo is taken as: `scan` — a scanner app's page (light evened
+   * out, the sheet straight); `camera` — the sheet fills the frame of a photo
+   * lit unevenly: a made-up camera tilts it (only on a blank, whose printing
+   * is ours to place); `photo` — as the photo shows it.
+   */
+  const captureFor = (d: Desk): 'scan' | 'camera' | 'photo' => {
+    if (capture.mode === 'scan') return 'scan';
+    const full = fillsFrame(d.corners, d.photo.width, d.photo.height);
+    if (capture.mode === 'photo') return full && blankId ? 'camera' : 'photo';
+    if (!full) return 'photo';
+    // The tilt read off the photo (or set by hand) beats the light's guess.
+    if (blankId && (d.handTilt || sureTilt(d.tilt))) return 'camera';
+    let spread = spreads.current.get(d.id);
+    if (spread === undefined) {
+      spread = lightSpread(d.photo, d.corners);
+      spreads.current.set(d.id, spread);
+    }
+    if (spread < 0.08) return 'scan';
+    return blankId ? 'camera' : 'photo';
+  };
+  /** The camera's turn for a sheet filling the frame: set by hand, else found sure enough; null — made up. */
+  const turnOf = (d: Desk) => (d.handTilt ? rotOf(d.handTilt) : sureTilt(d.tilt) ? d.tilt.rot : null);
+  /** Where the sheet lies for the printing and the ink, and what the camera adds (waves only on a blank: a notebook's own lines are in the photo). */
+  const geometryFor = (d: Desk) => {
+    const how = captureFor(d);
+    if (how === 'camera') {
+      const corners = cameraCorners(d.corners, d.photo.width, d.photo.height, capture.seed, turnOf(d), focalOf(d));
+      return {
+        how,
+        corners,
+        warp: { corners, bulge: null, grid: null } as Warp,
+        extras: { lens: lensOf(d.photo.width, d.photo.height, capture.seed), wave: wavesOf(d.photo, d.corners) },
+      };
+    }
+    return { how, corners: d.corners, warp: warpOf(d), extras: how === 'photo' && blankId ? { wave: wavesOf(d.photo, d.corners, 0.0025) } : {} };
+  };
+
   const draw = async (d: Desk, p: number, wanted: () => boolean = () => true) => {
     const canvas = canvasRef.current;
     if (!canvas || !layout) throw new Error('нечего рисовать');
@@ -658,20 +1045,54 @@ export function DeskDialog(props: Props) {
     }
     const r = renderer.current;
     const on = onDesk(d, layout);
-    const scale = rasterScale(layout, d.corners, Math.min(r.maxTexture, 8192), on);
-    const raster = await rasterize(layout.pages[p] ?? '', layout.size, scale);
+    const geo = geometryFor(d);
+    const scale = rasterScale(layout, geo.corners, Math.min(r.maxTexture, 8192), on);
+    const parts = layout.layers[p];
+    // The text, the drawings and the rubbed graphite apart: each stage can be shown without the next.
+    const raster = await rasterize(parts?.text ?? layout.pages[p] ?? '', layout.size, scale);
+    const drawn = parts ? await rasterize(parts.drawings, layout.size, scale) : null;
+    // The light on the creases comes from where the photo's paper is brighter (page px, y down).
+    const lit = lightFrom(d.photo, geo.corners);
+    let light = { x: -0.6, y: -0.8 };
+    if (lit) {
+      const [a, b, , c, e] = on.place;
+      const lx = lit.x * on.paper.w;
+      const ly = lit.y * on.paper.h;
+      const det = a * e - b * c || 1;
+      light = { x: (e * lx - b * ly) / det, y: (-c * lx + a * ly) / det };
+    }
+    const relief = reliefOf(layout.size, wear, mix32(docSeed(base.docId), p), layout.work[p]?.pivots ?? [], light);
+    // The blank is printed on the first sheet.
+    const toner = blankRow && p === 0 ? await tonerRaster(blankRow, print.color, layout.size, scale) : null;
+    // A scanner app's page: the photo with its light evened out (made once per photo).
+    let photo = d.photo;
+    if (geo.how === 'scan') {
+      let job = scans.current.get(d.id);
+      if (!job) {
+        job = scannerLook(d.photo);
+        scans.current.set(d.id, job);
+      }
+      photo = await job;
+    }
     if (!wanted() || renderer.current !== r) return null;
-    if (shown.current !== d.id) {
-      r.setPhoto(d.photo);
-      shown.current = d.id;
+    const shownKey = `${d.id}|${geo.how}`;
+    if (shown.current !== shownKey) {
+      r.setPhoto(photo);
+      shown.current = shownKey;
     }
     r.setMask(d.mask);
-    r.setInk(raster, rasterizePen(layout.strokes[p] ?? [], layout.size, scale), placement(layout, warpOf(d), on));
+    r.setToner(toner);
+    r.setLayers(drawn, parts?.wear ?? null);
+    r.setRelief(relief);
+    r.setPrinter(printerLook(wear.printer, wear.printerSeed));
+    r.setInk(raster, rasterizePen(layout.strokes[p] ?? [], layout.size, scale), placement(layout, geo.warp, on, geo.extras));
     return r;
   };
 
   const shownDesk = deskFor(page);
-  const shownKey = shownDesk ? `${shownDesk.id}${shapeOf(shownDesk.corners, shownDesk.bend)}${shownDesk.rulingKey}${JSON.stringify(shownDesk.margins)}${shownDesk.maskKey}` : '';
+  const shownKey = shownDesk
+    ? `${shownDesk.id}${shapeOf(shownDesk.corners, shownDesk.bend)}${shownDesk.rulingKey}${JSON.stringify(shownDesk.margins)}${shownDesk.maskKey}${JSON.stringify(turnOf(shownDesk))}`
+    : '';
   useEffect(() => {
     if (step !== 3 || !shownDesk || !layout || !isConvexClockwise(shownDesk.corners)) return;
     let alive = true;
@@ -683,15 +1104,21 @@ export function DeskDialog(props: Props) {
     return () => {
       alive = false;
     };
-  }, [step, layout, page, shownKey, glEpoch, refKey]);
+  }, [step, layout, page, shownKey, glEpoch, refKey, blankRow, print.color, capture.mode, capture.seed, reliefKey, wear.printer, wear.printerSeed]);
+
+  // A photo kept before the tilt was looked for (or whose sheet was not searched): looked at once, when shown.
+  const lookAt = step === 3 ? shownDesk : step > 0 ? cur : null;
+  useEffect(() => {
+    if (lookAt && lookAt.tilt === undefined) void lookForTilt(lookAt);
+  }, [lookAt?.id, lookAt?.tilt === undefined]);
 
   // A brushed mask goes straight to the GPU.
   useEffect(() => {
-    if (step === 3 && shownDesk && shown.current === shownDesk.id) renderer.current?.setMask(shownDesk.mask);
+    if (step === 3 && shownDesk && shown.current?.startsWith(`${shownDesk.id}|`)) renderer.current?.setMask(shownDesk.mask);
   }, [shownDesk?.mask]);
 
   useEffect(() => {
-    if (step === 3 && inkReady && shownDesk) renderer.current?.render(lookFor(shownDesk), photoLookOf(shownDesk, calib?.t ?? null), base.ink);
+    if (step === 3 && inkReady && shownDesk) renderer.current?.render(lookFor(shownDesk), photoLookOf(shownDesk, calib?.t ?? null), base.ink, print.toner, stage, leftStage);
   });
 
   /** Takes the real pen's colour from words written on the sheet (a click on them). */
@@ -722,19 +1149,24 @@ export function DeskDialog(props: Props) {
   const penMm = layout ? ((getHandwriting().style.weight * layout.fontSize) / 1000) * pageScale(layout) / MM : 0;
 
   const fileName = (p: number) => `${safeFilename(base.title)}${pageCount > 1 ? ` — лист ${p + 1}` : ''} (фото).jpg`;
+  /** All the sheets at once: by the desk's name (or the document's), «Стол_1.jpg», «Стол_2.jpg»… */
+  const sheetFile = (p: number) => `${safeFilename(deskName.trim() || base.title)}_${p + 1}.jpg`;
 
   const savePages = async (pages: number[]) => {
     setError(null);
     try {
+      // One export, one folder.
+      const folder = await exportFolder();
       for (const [i, p] of pages.entries()) {
         const d0 = deskFor(p);
         if (!d0) continue;
         setBusy(pages.length > 1 ? `Сохраняю лист ${i + 1} из ${pages.length}…` : 'Сохраняю…');
-        const d = (await prepare(d0.id, { ruling: sheet.paper !== 'plain', mask: true, measure: true })) ?? d0;
+        const d = (await prepare(d0.id, { ruling: paperKind !== 'plain', mask: true, measure: true })) ?? d0;
         const r = await draw(d, p);
         if (!r) continue;
-        r.render({ ...lookFor(d), split: 0 }, photoLookOf(d, calib?.t ?? null), base.ink);
-        await saveFile(await r.jpeg(0.92), fileName(p));
+        // What is shown is what is saved: «до чертежей» saves the photo with the printing only.
+        r.render({ ...lookFor(d), split: 0 }, photoLookOf(d, calib?.t ?? null), base.ink, print.toner, stage);
+        await saveFile(await r.jpeg(0.92), pages.length > 1 ? sheetFile(p) : fileName(p), folder);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -787,596 +1219,829 @@ export function DeskDialog(props: Props) {
   const calibSwatch = calib ? `rgb(${calib.t.map((t) => Math.round(255 * Math.min(1, 0.92 * t) ** (1 / 2.2))).join(',')})` : null;
   const blurValue = shownDesk ? Math.round((shownDesk.measure?.sigma ?? FALLBACK_BLUR) * blurGain * 100) / 100 : FALLBACK_BLUR;
 
-  const deskTabs = desks.length > 1 && (
-    <div className="desk-tabs">
-      {desks.map((d, i) => (
-        <button key={d.id} className={d.id === cur?.id ? 'on' : ''} onClick={() => setCurId(d.id)} title={d.name}>
-          {i + 1}. {d.name}
-        </button>
-      ))}
-    </div>
-  );
+  /** The sheet's top goes to the next side; the bend turns with it (sides move round, the grid is fitted anew). */
+  const turnTop = (d: Desk) => {
+    const [c, s, b] = [d.corners, d.snapped, d.bend];
+    patch(d.id, {
+      corners: [c[1], c[2], c[3], c[0]],
+      snapped: [s[1], s[2], s[3], s[0]],
+      bend: b && { ...b, bulge: [b.bulge[1], b.bulge[2], b.bulge[3], b.bulge[0]], grid: zeroGrid(), fixed: false, lines: undefined },
+    });
+  };
+  const toggleBend = (d: Desk) => {
+    if (d.bend) {
+      patch(d.id, { bend: null });
+      return;
+    }
+    setBusy('Ищу изогнутые края…');
+    void curve(d, d.corners, true)
+      .then((c) => c && patch(d.id, { ...c, touched: true }))
+      .catch((err) => setError(String(err)))
+      .finally(() => setBusy(null));
+  };
 
-  const keepButton = cur && (
-    <button className="btn wide" disabled={!!busy || !valid} onClick={() => void keep(cur)} title="Фото и разметку можно будет открыть снова">
-      {cur.savedId ? 'Обновить в «Мои столы»' : 'Сохранить в «Мои столы»'}
+  // «[» and «]» change the brush.
+  useEffect(() => {
+    if (step !== 2) return;
+    const keys = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === '[') setBrushRadius((r) => Math.max(6, Math.round(r / 1.25)));
+      if (e.key === ']') setBrushRadius((r) => Math.min(200, Math.round(r * 1.25)));
+    };
+    document.addEventListener('keydown', keys);
+    return () => document.removeEventListener('keydown', keys);
+  }, [step]);
+
+  // What the program has to say, over the photo.
+  const messages: Message[] = [];
+  if (error) messages.push({ key: `error:${error}`, kind: 'error', text: error });
+  if (cur && (step === 1 || step === 2) && foundNote[cur.id]) messages.push({ key: `found:${cur.id}:${foundNote[cur.id]}`, kind: 'info', text: foundNote[cur.id] });
+  if (note) messages.push({ key: `note:${note}`, kind: 'info', text: note });
+  if (step === 1 && cur && !valid) {
+    messages.push({ key: 'twisted', kind: 'warn', text: 'Уголки перекрутились: расставьте их по кругу, по часовой стрелке от верхнего левого.' });
+  }
+  // (Corners outside the frame are the photo's frame seen in perspective: its shape, not the sheet's.)
+  const beyond = !!cur && cur.corners.some(([x, y]) => x < -1 || y < -1 || x > cur.photo.width + 1 || y > cur.photo.height + 1);
+  if (step === 1 && cur && valid && !blankId && !beyond && sheet.orient !== 'landscape' && topLooksSideways(cur.corners, paperFor(cur))) {
+    messages.push({ key: `sideways:${cur.id}`, kind: 'warn', text: 'Похоже, верх листа отмечен сбоку.', action: { label: '↻ Повернуть', run: () => turnTop(cur) } });
+  }
+  if (step === 2 && cur && hasRuling(cur)) {
+    const r = cur.ruling;
+    const hint = r && formatHint(r, paperFor(cur), sheet.byGrid);
+    if (!r && paperKind !== 'plain') messages.push({ key: `nolines:${cur.id}`, kind: 'warn', text: 'Линии не нашлись: текст ляжет как на чистом листе.' });
+    if (hint) messages.push({ key: `format:${hint}`, kind: 'warn', text: hint });
+    if (r && sheet.paper === 'plain' && !blankId) {
+      const grid = r.kind === 'grid';
+      messages.push({
+        key: `suggest:${cur.id}`,
+        kind: 'warn',
+        text: `На листе ${grid ? 'клетка' : 'линейка'}: подогнать текст под неё?`,
+        action: { label: grid ? 'Да, в клетку' : 'Да, в линейку', run: () => changeSheet({ paper: r.kind }) },
+      });
+    }
+  }
+  const shownMessages = messages.filter((m) => !gone.includes(m.key));
+  const dismiss = (key: string) => (key.startsWith('error:') ? setError(null) : setGone((g) => [...g, key]));
+
+  const stepOff = (i: number) => i > 0 && (!cur || (i >= 2 && !valid) || (i === 3 && !allValid));
+  const hasPanel = step > 0 || desks.length > 0;
+  const hasRail = step > 0 && !!cur;
+  const hasStrip = desks.length > 0;
+
+  /** The panel's main button: on to the next step. */
+  const next = (to: number, label: string, disabled = false) => (
+    <button className="btn primary wide" disabled={disabled} onClick={() => setStep(to)}>
+      {label} →
     </button>
   );
 
-  const rulingInfo = (() => {
-    if (!cur || !hasRuling(cur)) return null;
+  const rulingLine = (() => {
+    if (!cur || !hasRuling(cur)) return <p className="muted small">Ищу…</p>;
     const r = cur.ruling;
-    if (!r) {
-      return sheet.paper === 'plain' ? (
-        <p className="muted small">Линовки на листе нет.</p>
-      ) : (
-        <p className="desk-hint">Линии не нашлись: текст ляжет как на чистом листе.</p>
-      );
-    }
-    const what = r.kind === 'grid' ? `Клетка ${num(r.colStep ?? r.step)} × ${num(r.step)} мм` : `Линейка через ${num(r.step)} мм`;
-    const lean = Math.abs(r.slope) > 0.001 ? `, наклон к краю ${num((Math.atan(r.slope) * 180) / Math.PI, 2)}°` : '';
-    const hint = formatHint(r, paperFor(cur), sheet.byGrid);
-    const bySquares = sheet.byGrid && cur.gridSize;
+    if (!r) return <p className="muted small">{paperKind === 'plain' ? 'Линовки на листе нет.' : 'Линии не нашлись.'}</p>;
+    const what = r.kind === 'grid' ? `Клетка ${num(r.colStep ?? r.step)} мм` : `Линейка через ${num(r.step)} мм`;
     return (
-      <>
-        <p className="small">
-          {what}
-          {lean}.{bySquares ? ` Лист по клеткам: ${num(cur.gridSize![0])} × ${num(cur.gridSize![1])} мм.` : ''}
-        </p>
-        {hint && <p className="desk-hint">{hint}</p>}
-        {cur.bend?.lines && (
-          <p className="muted small">
-            Изгиб уточнён по линовке: строки отклонялись от прямой на {num(cur.bend.lines.before, 2)} мм, теперь на {num(cur.bend.lines.after, 2)} мм.
-          </p>
-        )}
-        {sheet.paper === 'plain' && (
-          <p className="desk-hint">
-            На листе {r.kind === 'grid' ? 'клетка' : 'линейка'}: подогнать текст под неё?{' '}
-            <button className="link-btn" onClick={() => changeSheet({ paper: r.kind })}>
-              Да, {r.kind === 'grid' ? 'в клетку' : 'в линейку'}
-            </button>
-          </p>
-        )}
-      </>
+      <p className="small">
+        {what}
+        {sheet.byGrid && cur.gridSize ? ` · лист ${num(cur.gridSize[0])} × ${num(cur.gridSize[1])} мм` : ''}
+      </p>
     );
   })();
+  const rulingHint =
+    cur?.ruling && hasRuling(cur) ? (
+      <>
+        {cur.ruling.kind === 'grid' ? `Клетка ${num(cur.ruling.colStep ?? cur.ruling.step)} × ${num(cur.ruling.step)} мм` : `Линейка через ${num(cur.ruling.step)} мм`}
+        {Math.abs(cur.ruling.slope) > 0.001 ? `, наклон к краю ${num((Math.atan(cur.ruling.slope) * 180) / Math.PI, 2)}°` : ''}.
+        {sheet.byGrid && cur.gridSize ? ` Размер листа прочитан по клеткам (каждая — 5 мм).` : ''}
+        {cur.bend?.lines && ` Изгиб уточнён по линовке: строки отклонялись от прямой на ${num(cur.bend.lines.before, 2)} мм, теперь на ${num(cur.bend.lines.after, 2)} мм.`}
+      </>
+    ) : (
+      'Линии клетки или линейки, найденные на листе: по ним ложатся строки текста.'
+    );
 
   return createPortal(
     <div className="desk-backdrop">
-      <div className="desk-dialog" role="dialog" aria-modal="true" aria-label="Текст на фото листа">
-        <header className="desk-top">
-          <h2>На столе (фото)</h2>
-          <ol className="desk-steps">
+      <div
+        className={`desk-dialog ${hasPanel ? 'has-panel' : ''} ${hasRail ? 'has-rail' : ''} ${hasStrip ? 'has-strip' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Текст на фото листа"
+      >
+        <header className="desk-head">
+          <div className="desk-title float">
+            <span>На столе</span>
+            {deskId && <input className="desk-name" value={deskName} onChange={(e) => setDeskName(e.target.value)} aria-label="Имя стола" title="Имя стола в «Мои столы»" />}
+          </div>
+          <nav className="pill float desk-steps" aria-label="Шаги">
             {STEPS.map((name, i) => (
-              <li key={name}>
-                <button className={i === step ? 'on' : ''} disabled={i > 0 && (!cur || (i >= 2 && !valid) || (i === 3 && !allValid))} onClick={() => setStep(i)}>
-                  <span className="desk-step-n">{i + 1}</span> {name}
-                </button>
-              </li>
+              <button key={name} className={i === step ? 'on' : ''} disabled={stepOff(i)} onClick={() => setStep(i)}>
+                <span className="desk-step-n">{i + 1}</span>
+                {name}
+              </button>
             ))}
-          </ol>
-          <button className="sketch-help-close" onClick={onClose} aria-label="Закрыть">
-            ✕
-          </button>
+          </nav>
+          <div className="desk-head-end">
+            {deskId ? (
+              <span className="desk-saved" title="Стол в «Мои столы» сохраняется сам">
+                {saving ? 'Сохраняю…' : 'Сохранено ✓'}
+              </span>
+            ) : (
+              desks.length > 0 && (
+                <button className="btn desk-keep" disabled={!!busy} onClick={keepDesk} title="Все фото, разметка и настройки — в «Мои столы»; дальше стол сохраняется сам">
+                  Сохранить стол
+                </button>
+              )
+            )}
+            <button className="rail-btn desk-close" onClick={() => void close()} aria-label="Закрыть" title="Закрыть (Esc)">
+              <CloseIcon />
+            </button>
+          </div>
         </header>
 
-        <div className="desk-body">
-          <main className="desk-main">
-            {step === 0 && (
-              <div
-                className={`desk-drop ${drop ? 'over' : ''}`}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDrop(true);
-                }}
-                onDragLeave={() => setDrop(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDrop(false);
-                  void addFiles([...e.dataTransfer.files]);
-                }}
-              >
-                <p className="desk-drop-title">Перетащите сюда фото листов на столе</p>
-                <button className="btn primary" onClick={() => fileRef.current?.click()}>
-                  {desks.length ? 'Добавить фото…' : 'Выбрать фото…'}
-                </button>
-                <p className="muted small">
-                  Пустые листы, снятые сверху при ровном свете: одно фото на все листы документа или по фото на лист. JPG, PNG или WebP; большие фото
-                  уменьшаются до {WORK_SIDE} px по длинной стороне.
-                </p>
-                {saved.length > 0 && (
-                  <div className="desk-gallery">
-                    <h3>Мои столы</h3>
-                    <ul>
-                      {saved.map((s) => (
-                        <li key={s.id}>
-                          <button className="desk-card" onClick={() => void openSaved(s)} title="Открыть этот стол">
-                            <SavedThumb blob={s.thumb} />
-                            <span>{s.name}</span>
-                            <span className="muted small">{new Date(s.updatedAt).toLocaleDateString('ru-RU')}</span>
-                          </button>
-                          <button
-                            className="doc-delete"
-                            aria-label="Удалить стол"
-                            title="Удалить из «Мои столы»"
-                            onClick={() => confirm(`Удалить «${s.name}» из «Мои столы»?`) && void deleteDesk(s.id)}
-                          >
-                            ✕
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-            {step === 1 && cur && (
-              <CornerEditor
-                key={cur.id}
-                photo={cur.photo}
-                corners={cur.corners}
-                onChange={(c) => {
-                  edits.current++;
-                  patch(cur.id, { corners: c, touched: true });
-                }}
-                bend={cur.bend}
-                onGrid={(grid) => cur.bend && patch(cur.id, { bend: { ...cur.bend, grid, fixed: true, lines: undefined } })}
-                snapped={cur.snapped}
-                onRelease={(i, free, at) => void release(cur, i, free, at)}
-                onNudge={(i) => patch(cur.id, { touched: true, snapped: cur.snapped.map((v, k) => (k === i || k === (i + 3) % 4 ? false : v)) })}
-              />
-            )}
-            {step === 2 && cur && (
-              <MaskEditor
-                key={cur.id}
-                photo={cur.photo}
-                warp={warpOf(cur)}
-                paperMm={paperFor(cur)}
-                ruling={hasRuling(cur) ? cur.ruling : null}
-                margins={marginsOf(cur)}
-                mask={cur.maskKey === keyOf(cur) ? cur.mask : null}
-                tool={tool}
-                brush={brush}
-                radius={brushRadius}
-                onChange={(m) => patch(cur.id, { mask: m })}
-                onMargins={(m) => patch(cur.id, { margins: m })}
-              />
-            )}
-            <div className={`desk-result ${actual ? 'actual' : ''} ${picking ? 'picking' : ''}`} hidden={step !== 3}>
-              <canvas
-                ref={canvasRef}
-                onClick={(e) => void pickPen(e)}
-                style={
-                  actual && shownDesk
-                    ? { width: shownDesk.photo.width / (window.devicePixelRatio || 1), height: shownDesk.photo.height / (window.devicePixelRatio || 1) }
-                    : undefined
-                }
-              />
-            </div>
-            {(busy || preparing || (step === 3 && !layout)) && <div className="desk-busy">{busy ?? preparing ?? 'Раскладываю текст по листу…'}</div>}
-          </main>
-
-          <aside className="desk-side">
-            {error && (
-              <p className="desk-error" role="alert">
-                {error}
-              </p>
-            )}
-
-            {step === 0 && (
+        {hasRail && cur && (
+          <div className="desk-rail float">
+            {step === 1 && (
               <>
-                <p className="muted small">
-                  Программа напишет текст документа на этих листах: с перспективой, под тем же светом и с теми же тенями, что на снимках.
-                </p>
-                {desks.length > 0 && (
-                  <>
-                    <h3>Фото в этом экспорте</h3>
-                    <ul className="desk-list">
-                      {desks.map((d, i) => (
-                        <li key={d.id}>
-                          <button
-                            className="desk-card"
-                            onClick={() => {
-                              setCurId(d.id);
-                              setStep(1);
-                            }}
-                          >
-                            <Thumb photo={d.photo} />
-                            <span>
-                              {i + 1}. {d.name}
-                            </span>
-                          </button>
-                          <button className="doc-delete" aria-label="Убрать фото" title="Убрать из экспорта" onClick={() => removeDesk(d)}>
-                            ✕
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                    <button className="btn primary wide desk-next" onClick={() => setStep(1)}>
-                      Дальше: лист →
-                    </button>
-                  </>
-                )}
-              </>
-            )}
-
-            {step === 1 && cur && (
-              <>
-                {deskTabs}
-                {foundNote[cur.id] && <p className="desk-hint">{foundNote[cur.id]}</p>}
-                {note && <p className="desk-hint">{note}</p>}
-                <p className="muted small">
+                <Tool icon={<TurnIcon />} label="Верх листа — на следующую сторону" onClick={() => turnTop(cur)} />
+                <Tool icon={<RotatePhotoIcon />} label="Повернуть снимок на 90° (скан или фото пришли боком)" disabled={!!busy} onClick={() => void rotatePhoto(cur)} />
+                <Tool
+                  icon={<FindSheetIcon />}
+                  label="Найти лист заново"
+                  disabled={!!busy}
+                  onClick={() => {
+                    setBusy('Ищу лист на фото…');
+                    void findSheet(cur, true).finally(() => setBusy(null));
+                  }}
+                />
+                <Tool
+                  icon={<ScanIcon />}
+                  label="Скан: лист занимает весь снимок, без перспективы и изгиба"
+                  onClick={() => patch(cur.id, { corners: frameOf(cur.photo), snapped: NONE, bend: null, touched: true })}
+                />
+                <Tool icon={<CurveIcon />} label={cur.bend ? 'Изогнутый лист: выключить' : 'Изогнутый лист: края дугой, страница у корешка'} on={!!cur.bend} disabled={!!busy} onClick={() => toggleBend(cur)} />
+                <span className="rail-sep" />
+                <Hint side="right">
                   Перетащите уголки на уголки листа: отпущенный уголок прилипает к краям (сплошная линия — край найден, пунктир — нет). С Alt — без
-                  прилипания, с Shift — точнее, стрелками — на ¼ пикселя (Tab — следующий уголок).
-                </p>
-                <div className="desk-row">
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      const c = cur.corners;
-                      const s = cur.snapped;
-                      const b = cur.bend;
-                      // The bend turns with the sheet: sides move round, the grid is fitted anew.
-                      patch(cur.id, {
-                        corners: [c[1], c[2], c[3], c[0]],
-                        snapped: [s[1], s[2], s[3], s[0]],
-                        bend: b && { ...b, bulge: [b.bulge[1], b.bulge[2], b.bulge[3], b.bulge[0]], grid: zeroGrid(), fixed: false, lines: undefined },
-                      });
-                    }}
-                  >
-                    ↻ верх листа
-                  </button>
-                  <button
-                    className="btn"
-                    disabled={!!busy}
-                    onClick={() => {
-                      setBusy('Ищу лист на фото…');
-                      void findSheet(cur, true).finally(() => setBusy(null));
-                    }}
-                    title="Найти лист на фото заново"
-                  >
-                    Найти лист
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() => patch(cur.id, { corners: frameOf(cur.photo), snapped: NONE, bend: null, touched: true })}
-                    title="Лист занимает весь снимок, снят ровно: без перспективы и изгиба"
-                  >
-                    Скан
-                  </button>
-                </div>
-                <label className="check" title="Лист не лежит ровно: края дугой, страница у корешка тетради">
-                  <input
-                    type="checkbox"
-                    checked={!!cur.bend}
-                    disabled={!!busy}
-                    onChange={(e) => {
-                      if (!e.target.checked) {
-                        patch(cur.id, { bend: null });
-                        return;
-                      }
-                      setBusy('Ищу изогнутые края…');
-                      void curve(cur, cur.corners, true)
-                        .then((c) => c && patch(cur.id, { ...c, touched: true }))
-                        .catch((err) => setError(String(err)))
-                        .finally(() => setBusy(null));
-                    }}
-                  />
-                  Изогнутый лист
-                </label>
-                {cur.bend && (
-                  <p className="muted small">
-                    Края выгнуты до {num(cur.bend.max)} px. Квадратные точки сетки можно тянуть там, где текст должен лечь иначе
-                    {sheet.paper !== 'plain' ? ' — на линованном листе сетка сама подстроится под линии на шаге «Помехи»' : ''}.
-                  </p>
-                )}
-                {!valid && <p className="desk-error">Уголки перекрутились: расставьте их по кругу, по часовой стрелке от верхнего левого.</p>}
-                {valid && topLooksSideways(cur.corners, paperFor(cur)) && <p className="desk-hint">Похоже, верх листа отмечен сбоку. Нажмите «↻ верх листа».</p>}
-                <h3>Лист</h3>
-                <div className="segmented">
-                  {(Object.keys(SHEET_KINDS) as SheetKind[]).map((k) => (
-                    <button key={k} className={sheet.kind === k ? 'on' : ''} onClick={() => changeSheet({ kind: k })}>
-                      {SHEET_KINDS[k].name}
-                      <span className="desk-mm">
-                        {SHEET_KINDS[k].mm[0]}×{SHEET_KINDS[k].mm[1]}
-                      </span>
-                    </button>
-                  ))}
-                  <button className={sheet.kind === 'custom' ? 'on' : ''} onClick={() => changeSheet({ kind: 'custom' })}>
-                    Свой
-                    <span className="desk-mm">
-                      {num(sheet.custom[0], 0)}×{num(sheet.custom[1], 0)}
-                    </span>
-                  </button>
-                </div>
-                {sheet.kind === 'custom' && (
-                  <div className="desk-row desk-size">
-                    {([0, 1] as const).map((i) => (
-                      <label key={i}>
-                        {i ? 'высота' : 'ширина'}
-                        <input
-                          type="number"
-                          min={50}
-                          max={600}
-                          step={0.5}
-                          value={sheet.custom[i]}
-                          onChange={(e) => {
-                            const v = Number(e.target.value);
-                            if (v >= 50 && v <= 600) changeSheet({ custom: i ? [sheet.custom[0], v] : [v, sheet.custom[1]] });
-                          }}
-                        />
-                        мм
-                      </label>
-                    ))}
-                  </div>
-                )}
-                <label className="check" title="Клетка — 5 мм: по ней видно, какого размера лист на самом деле">
-                  <input type="checkbox" checked={sheet.byGrid} onChange={(e) => changeSheet({ byGrid: e.target.checked })} />
-                  Размер листа в клетку — по клеткам
-                </label>
-                <div className="segmented">
-                  {PAPER_NAMES.map(([k, name]) => (
-                    <button key={k} className={sheet.paper === k ? 'on' : ''} onClick={() => changeSheet({ paper: k })}>
-                      {name}
-                    </button>
-                  ))}
-                </div>
-                {keepButton}
-                <button className="btn primary wide desk-next" disabled={!valid} onClick={() => setStep(2)}>
-                  Дальше: помехи →
-                </button>
+                  прилипания, с Shift — точнее, стрелками — на ¼ пикселя, Tab — следующий уголок.
+                  {cur.bend && ' Квадратные точки сетки изогнутого листа можно тянуть там, где текст должен лечь иначе.'}
+                </Hint>
               </>
             )}
-
-            {step === 2 && cur && (
+            {step === 2 && (
               <>
-                {deskTabs}
-                {foundNote[cur.id] && <p className="desk-hint">{foundNote[cur.id]}</p>}
-                {note && <p className="desk-hint">{note}</p>}
-                <h3>Линовка</h3>
-                {rulingInfo ?? <p className="muted small">Ищу…</p>}
-                <div className="segmented">
-                  <button className={tool === 'brush' ? 'on' : ''} onClick={() => setTool('brush')}>
-                    кисть
-                  </button>
-                  <button className={tool === 'margins' ? 'on' : ''} onClick={() => setTool('margins')}>
-                    поля
-                  </button>
-                </div>
-                <h3>Поля</h3>
-                <p className="muted small">
-                  Текст пишется между розовыми линиями полей. В режиме «поля» их можно перетащить — они прилипают к линиям клетки.
-                </p>
-                <ul className="desk-margins">
-                  {SIDES.map(([side, name]) => {
-                    const m = marginsOf(cur);
-                    const v = m[side];
-                    const [pw, ph] = paperFor(cur);
-                    const fallback = { left: 20, right: pw - 10, top: 10, bottom: ph - 10 }[side];
-                    return (
-                      <li key={side}>
-                        <span>{name}</span>
-                        {v !== null ? (
-                          <>
-                            <output>{num(v)} мм</output>
-                            <button className="link-btn" onClick={() => patch(cur.id, { margins: { ...m, [side]: null } })}>
-                              убрать
-                            </button>
-                          </>
-                        ) : (
-                          <button
-                            className="link-btn"
-                            onClick={() => {
-                              patch(cur.id, { margins: { ...m, [side]: fallback } });
-                              setTool('margins');
-                            }}
-                          >
-                            добавить
-                          </button>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-                {cur.margins && (
-                  <button className="link-btn" onClick={() => patch(cur.id, { margins: null })}>
-                    ↺ Как найдено
-                  </button>
-                )}
-                <h3>Предметы на листе</h3>
-                <p className="muted small">
-                  Красным — где текст не пишется: ручка, пальцы, всё, что не похоже на бумагу. Кистью можно добавить или вернуть бумагу.
-                  {cur.maskKey === keyOf(cur) && cur.mask ? ` Найдено: ${cur.mask.objects}.` : ''}
-                </p>
-                <div className="segmented">
-                  <button
-                    className={tool === 'brush' && brush === 'erase' ? 'on' : ''}
-                    onClick={() => {
-                      setBrush('erase');
-                      setTool('brush');
-                    }}
-                  >
-                    стереть
-                  </button>
-                  <button
-                    className={tool === 'brush' && brush === 'restore' ? 'on' : ''}
-                    onClick={() => {
-                      setBrush('restore');
-                      setTool('brush');
-                    }}
-                  >
-                    вернуть
-                  </button>
-                </div>
-                <label className="slider">
-                  <span>
-                    Кисть, px <output>{brushRadius}</output>
-                  </span>
-                  <input type="range" min={6} max={200} step={2} value={brushRadius} onChange={(e) => setBrushRadius(Number(e.target.value))} />
-                </label>
-                <div className="desk-row">
-                  <button className="btn" onClick={() => patch(cur.id, { maskKey: null })} title="Найти предметы заново (кисть забудется)">
-                    Найти заново
-                  </button>
-                  <button
-                    className="btn"
-                    disabled={!cur.mask}
-                    onClick={() => cur.mask && patch(cur.id, { mask: { ...cur.mask, objects: 0, data: new Uint8Array(cur.mask.data.length).fill(255) } })}
-                  >
-                    Очистить
-                  </button>
-                </div>
-                {keepButton}
-                <button className="btn primary wide desk-next" disabled={!allValid} onClick={() => setStep(3)}>
-                  Дальше: чернила →
-                </button>
+                <Tool
+                  icon={<EraseIcon />}
+                  label="Стереть: здесь текст не пишется"
+                  on={tool === 'brush' && brush === 'erase'}
+                  onClick={() => {
+                    setBrush('erase');
+                    setTool('brush');
+                  }}
+                />
+                <Tool
+                  icon={<BrushIcon />}
+                  label="Вернуть бумагу"
+                  on={tool === 'brush' && brush === 'restore'}
+                  onClick={() => {
+                    setBrush('restore');
+                    setTool('brush');
+                  }}
+                />
+                <Tool icon={<MarginsIcon />} label="Поля: тянуть розовые линии" on={tool === 'margins'} onClick={() => setTool('margins')} />
+                <Tool icon={<DotIcon />} label="Размер кисти">
+                  <label className="slider desk-brush">
+                    <span>
+                      Кисть, px <output>{brushRadius}</output>
+                    </span>
+                    <input type="range" min={6} max={200} step={2} value={brushRadius} onChange={(e) => setBrushRadius(Number(e.target.value))} />
+                    <span className="muted small">Клавиши [ и ] — меньше и больше</span>
+                  </label>
+                </Tool>
+                <span className="rail-sep" />
+                <Tool icon={<AgainIcon />} label="Найти предметы заново (кисть забудется)" onClick={() => patch(cur.id, { maskKey: null })} />
+                <Tool
+                  icon={<ClearIcon />}
+                  label="Очистить: убрать все красные отметки"
+                  disabled={!cur.mask}
+                  onClick={() => cur.mask && patch(cur.id, { mask: { ...cur.mask, objects: 0, data: new Uint8Array(cur.mask.data.length).fill(255) } })}
+                />
               </>
             )}
-
             {step === 3 && (
               <>
-                {pageCount > 1 && (
-                  <label className="slider">
-                    <span>Лист документа</span>
-                    <select value={page} onChange={(e) => setPage(Number(e.target.value))}>
-                      {Array.from({ length: pageCount }, (_, i) => (
-                        <option key={i} value={i}>
-                          {i + 1} из {pageCount}
+                {look.pen !== 'pencil' && (
+                  <Tool
+                    icon={<PipetteIcon />}
+                    label={picking ? 'Щёлкните по слову на фото…' : 'Взять цвет с настоящей ручки: щёлкнуть по слову на листе'}
+                    on={picking}
+                    onClick={() => setPicking(!picking)}
+                  />
+                )}
+                <Tool icon={<ActualIcon />} label="Масштаб 1:1" on={actual} onClick={() => setActual(!actual)} />
+              </>
+            )}
+          </div>
+        )}
+
+        <main className="desk-main">
+          {step === 0 && (
+            <div
+              className={`desk-drop ${drop ? 'over' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDrop(true);
+              }}
+              onDragLeave={() => setDrop(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDrop(false);
+                void addFiles([...e.dataTransfer.files]);
+              }}
+            >
+              <div className="desk-drop-zone">
+                <p className="desk-drop-title">Перетащите сюда фото листов</p>
+                <div className="desk-drop-row">
+                  <button className="btn primary" onClick={() => fileRef.current?.click()}>
+                    {desks.length ? 'Добавить фото…' : 'Выбрать фото…'}
+                  </button>
+                  <Hint side="below">
+                    Программа напишет текст документа на этих листах — с перспективой, под тем же светом и с теми же тенями, что на снимках. Нужны пустые листы,
+                    снятые сверху при ровном свете: одно фото на все листы документа или по фото на лист. JPG, PNG или WebP; большие фото уменьшаются до{' '}
+                    {WORK_SIDE} px по длинной стороне.
+                  </Hint>
+                </div>
+              </div>
+              {saved.length > 0 && (
+                <section className="desk-shelf">
+                  <h3>
+                    Мои столы
+                    <Hint side="right">Стол — это все фото экспорта с разметкой и настройками. Открытый стол встаёт как был и сохраняется сам. «+ фото» добавляет его фото к фото здесь.</Hint>
+                  </h3>
+                  <ul>
+                    {saved.map((s) => (
+                      <li key={s.id} className={`desk-shelf-card float ${s.id === deskId ? 'on' : ''}`}>
+                        <button className="desk-shelf-open" onClick={() => void openSaved(s)} title="Открыть этот стол: фото, разметку и настройки">
+                          <SavedThumb blob={s.thumb} />
+                          <span className="desk-shelf-name">{s.name}</span>
+                          <span className="muted small">
+                            {s.photos.length} фото · {new Date(s.updatedAt).toLocaleDateString('ru-RU')}
+                          </span>
+                        </button>
+                        <div className="desk-shelf-actions">
+                          {s.id !== deskId && (
+                            <button className="link-btn" disabled={!!busy} onClick={() => void addSaved(s)} title="Добавить фото этого стола к фото здесь">
+                              + фото
+                            </button>
+                          )}
+                          <button
+                            className="link-btn danger"
+                            title="Удалить из «Мои столы»"
+                            onClick={() => {
+                              if (!confirm(`Удалить «${s.name}» из «Мои столы»?`)) return;
+                              if (s.id === deskId) setDeskId(null);
+                              void deleteDesk(s.id);
+                            }}
+                          >
+                            удалить
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+          )}
+          {step === 1 && cur && (
+            <CornerEditor
+              key={cur.id}
+              photo={cur.photo}
+              corners={cur.corners}
+              onChange={(c) => {
+                edits.current++;
+                patch(cur.id, { corners: c, touched: true });
+              }}
+              bend={cur.bend}
+              onGrid={(grid) => cur.bend && patch(cur.id, { bend: { ...cur.bend, grid, fixed: true, lines: undefined } })}
+              snapped={cur.snapped}
+              onRelease={(i, free, at) => void release(cur, i, free, at)}
+              onNudge={(i) => patch(cur.id, { touched: true, snapped: cur.snapped.map((v, k) => (k === i || k === (i + 3) % 4 ? false : v)) })}
+              found={showLines ? cur.tilt?.lines : null}
+              guides={guides?.id === cur.id ? guides.lines : null}
+              onGuides={(lines, done) => {
+                setGuides({ id: cur.id, lines });
+                if (done) applyLines(cur, lines);
+              }}
+            />
+          )}
+          {step === 2 && cur && (
+            <MaskEditor
+              key={cur.id}
+              photo={cur.photo}
+              warp={warpOf(cur)}
+              paperMm={paperFor(cur)}
+              ruling={hasRuling(cur) ? cur.ruling : null}
+              margins={marginsOf(cur)}
+              mask={cur.maskKey === keyOf(cur) ? cur.mask : null}
+              tool={tool}
+              brush={brush}
+              radius={brushRadius}
+              onChange={(m) => patch(cur.id, { mask: m })}
+              onMargins={(m) => patch(cur.id, { margins: m })}
+            />
+          )}
+          <div className={`desk-result ${actual ? 'actual' : ''} ${picking ? 'picking' : ''}`} hidden={step !== 3}>
+            <canvas
+              ref={canvasRef}
+              onClick={(e) => void pickPen(e)}
+              style={
+                actual && shownDesk
+                  ? { width: shownDesk.photo.width / (window.devicePixelRatio || 1), height: shownDesk.photo.height / (window.devicePixelRatio || 1) }
+                  : undefined
+              }
+            />
+            {step === 3 && !actual && inkReady > 0 && shownDesk && <Shutter value={split} onChange={setSplit} aspect={shownDesk.photo.width / shownDesk.photo.height} />}
+            {step === 3 && inkReady > 0 && (
+              <div className="desk-stages" role="group" aria-label="Показать до этапа">
+                <span className="small muted">Показать до:</span>
+                <Pill value={stage} onChange={setStage} options={STAGES.map((s) => [s.id, s.name, s.hint] as [Stage, ReactNode, string])} />
+                {split > 0 && (
+                  <label className="small" title="Что показывает шторка слева">
+                    слева{' '}
+                    <select value={leftStage} onChange={(e) => setLeftStage(e.target.value as Stage)}>
+                      {STAGES.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name.toLowerCase()}
                         </option>
                       ))}
                     </select>
                   </label>
                 )}
-                {desks.length > 1 && (
-                  <>
-                    <div className="segmented">
-                      <button className={assign === 'one' ? 'on' : ''} onClick={() => setAssign('one')}>
-                        одно фото на все
-                      </button>
-                      <button className={assign === 'each' ? 'on' : ''} onClick={() => setAssign('each')}>
-                        своё для листа
-                      </button>
-                    </div>
-                    <label className="slider">
-                      <span>Фото для листа {page + 1}</span>
-                      <select
-                        value={shownDesk?.id ?? ''}
-                        onChange={(e) => (assign === 'one' ? setCurId(e.target.value) : setPageDesk({ ...pageDesk, [page]: e.target.value }))}
-                      >
-                        {desks.map((d, i) => (
-                          <option key={d.id} value={d.id}>
-                            {i + 1}. {d.name}
-                          </option>
+              </div>
+            )}
+          </div>
+          {(busy || preparing || (step === 3 && !layout)) && <div className="desk-busy">{busy ?? preparing ?? 'Раскладываю текст по листу…'}</div>}
+          <Toasts messages={shownMessages} onClose={dismiss} />
+        </main>
+
+        {hasStrip && (
+          <PhotoStrip
+            photos={desks}
+            current={step > 0 ? (step === 3 ? (shownDesk?.id ?? null) : (cur?.id ?? null)) : null}
+            onPick={(id) => {
+              if (step === 3 && assign === 'each' && desks.length > 1) setPageDesk({ ...pageDesk, [page]: id });
+              else setCurId(id);
+              if (step === 0) setStep(1);
+            }}
+            onRemove={(id) => {
+              const d = desks.find((x) => x.id === id);
+              if (d) removeDesk(d);
+            }}
+            onAdd={() => fileRef.current?.click()}
+          />
+        )}
+
+        {hasPanel && (
+          <aside className={`desk-panel float ${step === 0 ? 'short' : ''}`}>
+            <div className="desk-panel-body">
+              {step === 0 && (
+                <Section title="Фото" hint="Каждое фото — лист на столе. Его можно взять для всех листов документа или для одного; это выбирается на шаге «Чернила».">
+                  <p className="small">
+                    {desks.length} {desks.length === 1 ? 'фото' : 'фото'} в этом экспорте. Щёлкните по фото внизу, чтобы разметить его.
+                  </p>
+                </Section>
+              )}
+
+              {step === 1 && cur && (
+                <>
+                  <Section title="Формат листа" hint="Размер настоящего листа. На листе в клетку он читается по самим клеткам (каждая — 5 мм), если включено «размер по клеткам».">
+                    <Pill
+                      wrap
+                      value={sheet.kind}
+                      onChange={(k) => changeSheet({ kind: k })}
+                      options={[
+                        ...(Object.keys(SHEET_KINDS) as SheetKind[]).map(
+                          (k) => [k, <span className="desk-fmt">{SHEET_KINDS[k].name}<small>{SHEET_KINDS[k].mm[0]}×{SHEET_KINDS[k].mm[1]}</small></span>] as [DeskFormat, ReactNode],
+                        ),
+                        ['custom', <span className="desk-fmt">Свой<small>{num(sheet.custom[0], 0)}×{num(sheet.custom[1], 0)}</small></span>],
+                      ]}
+                    />
+                    {sheet.kind === 'custom' && (
+                      <div className="desk-size">
+                        {([0, 1] as const).map((i) => (
+                          <label key={i}>
+                            {i ? 'высота' : 'ширина'}
+                            <input
+                              type="number"
+                              min={50}
+                              max={600}
+                              step={0.5}
+                              value={sheet.custom[i]}
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (v >= 50 && v <= 600) changeSheet({ custom: i ? [sheet.custom[0], v] : [v, sheet.custom[1]] });
+                              }}
+                            />
+                            мм
+                          </label>
                         ))}
-                      </select>
+                      </div>
+                    )}
+                    <div className="desk-field">
+                      <span>Лист лежит</span>
+                      <Pill
+                        value={sheet.orient ?? 'auto'}
+                        onChange={(orient) => changeSheet({ orient })}
+                        options={[
+                          ['auto', 'авто', blankId ? 'Как показывают уголки: верхний край длиннее — альбомный' : 'Книжный (верх — короткая сторона)'],
+                          ['portrait', 'книжный'],
+                          ['landscape', 'альбомный'],
+                        ]}
+                      />
+                    </div>
+                    <label className="check">
+                      <input type="checkbox" checked={sheet.byGrid} onChange={(e) => changeSheet({ byGrid: e.target.checked })} />
+                      Размер в клетку — по клеткам
                     </label>
-                  </>
-                )}
-                {(!isA4(paperMm) || sheet.paper !== 'plain') && (
-                  <>
-                    <h3>Текст</h3>
-                    <div className="segmented">
-                      <button
-                        className={sheet.mode === 'document' ? 'on' : ''}
-                        onClick={() => changeSheet({ mode: 'document' })}
-                        title="Те же строки и те же листы, что в редакторе"
+                  </Section>
+                  {!blankId && (
+                    <Section title="Бумага" hint="Чистая, в линейку или в клетку: на линованной бумаге строки текста ложатся на её линии.">
+                      <Pill value={sheet.paper} onChange={(k) => changeSheet({ paper: k })} options={PAPER_NAMES.map(([k, name]) => [k, name] as [PaperStyle, ReactNode])} />
+                    </Section>
+                  )}
+                  {(() => {
+                    const { width: w, height: h } = cur.photo;
+                    const whole = !sidesBeyond(cur.corners, cur.snapped, w, h).some(Boolean);
+                    const t = cur.tilt;
+                    const found = sureTilt(t) ? t : null;
+                    const drawing = guides?.id === cur.id;
+                    const lines = t?.lines.length ?? 0;
+                    return (
+                      <Section
+                        title="Перспектива"
+                        hint="Как телефон держали над листом. Пока края листа в кадре, перспектива берётся по уголкам. Если лист выходит за кадр, она ищется по прямым линиям на снимке (строки и клетки, края стола и других листов) — их можно показать — или задаётся вручную: проведите две пары линий вдоль листа или поправьте ползунками."
+                        aside={
+                          cur.handTilt && (
+                            <button className="link-btn" onClick={() => setHandTilt(cur, null)} title="Забыть ручную перспективу">
+                              ↺ как найдено
+                            </button>
+                          )
+                        }
                       >
-                        как в документе
-                      </button>
-                      <button
-                        className={sheet.mode === 'fit' ? 'on' : ''}
-                        onClick={() => changeSheet({ mode: 'fit' })}
-                        title="Текст заново разбит по листу: на него войдёт больше"
-                      >
-                        заполнить лист
-                      </button>
-                    </div>
-                  </>
-                )}
-                {layout?.ref && (
-                  <>
-                    <p className="small">Строка через, {layout.ref.lines.kind === 'grid' ? 'клеток' : 'линеек'}</p>
-                    <div className="segmented">
-                      {[null, 1, 2, 3].map((n) => (
-                        <button key={n ?? 'auto'} className={sheet.every === n ? 'on' : ''} onClick={() => changeSheet({ every: n })}>
-                          {n ?? 'авто'}
-                        </button>
-                      ))}
-                    </div>
-                    <label className="slider" title="Высота строки букв в доле строки тетради: меньше — мельче буквы">
-                      <span>
-                        Размер букв, % строки <output>{Math.round(100 * (sheet.letters ?? lettersNow ?? 1))}</output>
-                        {sheet.letters !== null && (
-                          <button className="link-btn" onClick={() => changeSheet({ letters: null })}>
-                            {' '}
-                            ↺ авто
+                        <p className="small">
+                          {cur.handTilt
+                            ? `Задана вручную${cur.handLines ? ' по линиям' : ''}: ${describeTilt(cur.handTilt)}.`
+                            : t === undefined
+                              ? 'Ищу прямые линии на снимке…'
+                              : found
+                                ? `Найдена по линиям на снимке${found.by === 'one' ? ' (по одному направлению)' : ''}: ${describeTilt(anglesOf(found.rot))}.`
+                                : t && t.confidence >= SURE_TILT
+                                  ? 'По линиям на снимке лист снят прямо.'
+                                  : `Прямых линий на снимке ${lines ? 'мало' : 'нет'} — перспектива не найдена.`}
+                        </p>
+                        {whole && <p className="muted small">Края листа в кадре — перспектива берётся по уголкам.</p>}
+                        <label className="check">
+                          <input type="checkbox" checked={showLines && !drawing} disabled={!lines || drawing} onChange={(e) => setShowLines(e.target.checked)} />
+                          Показать найденные линии{lines ? ` (${lines})` : ''}
+                        </label>
+                        {whole && !drawing ? null : drawing ? (
+                          <>
+                            <p className="muted small">
+                              Перетащите концы линий: розовые — вдоль строк или верхнего края листа, голубые — вдоль полей или боковых краёв. Чем длиннее линии и дальше друг от друга, тем точнее.
+                            </p>
+                            <button className="btn" onClick={() => setGuides(null)}>
+                              Готово
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            className="btn"
+                            onClick={() => setGuides({ id: cur.id, lines: cur.handLines ?? startLines(t?.lines, cur.corners, w, h) })}
+                            title="Провести на снимке две пары линий вдоль листа: по ним перспектива считается точно"
+                          >
+                            ✎ Провести линии
                           </button>
                         )}
-                      </span>
-                      <input
-                        type="range"
-                        min={0.5}
-                        max={1.3}
-                        step={0.05}
-                        value={sheet.letters ?? lettersNow ?? 1}
-                        onChange={(e) => changeSheet({ letters: Number(e.target.value) })}
-                      />
-                    </label>
-                  </>
-                )}
-                {layout?.ref?.lines.kind === 'grid' && (
-                  <label className="check" title="Единица чертежа — целое число клеток, оси идут по линиям клетки">
-                    <input type="checkbox" checked={sheet.squares} onChange={(e) => changeSheet({ squares: e.target.checked })} />
-                    Чертежи по клеткам
-                  </label>
-                )}
-                {reflowNote && <p className="muted small">{reflowNote}</p>}
-                <h3>Ручка</h3>
-                <div className="segmented">
-                  {PENS.map(([k, name]) => (
-                    <button key={k} className={look.pen === k ? 'on' : ''} onClick={() => changeLook({ pen: k })}>
-                      {name}
-                    </button>
-                  ))}
-                </div>
-                {look.pen !== 'pencil' &&
-                  (calib ? (
-                    <div className="desk-calib">
-                      <span className="desk-swatch" style={{ background: calibSwatch ?? undefined }} />
-                      <span className="small">
-                        Цвет взят с настоящей ручки
-                        {calib.mm > 0 && penMm > 0 && (
-                          <span className="muted">
-                            {' '}
-                            · штрих {num(calib.mm, 2)} мм, у пера почерка {num(penMm, 2)} мм
-                          </span>
+                        {!whole && (
+                          <TiltSliders
+                            value={cur.handTilt ?? (found ? anglesOf(found.rot) : blankId ? madeUpAngles(capture.seed) : { pitch: 0, yaw: 0, roll: 0 })}
+                            onChange={(a) => setHandTilt(cur, a)}
+                          />
                         )}
-                      </span>
-                      <button className="link-btn" onClick={() => setCalib(null)}>
-                        Сбросить
-                      </button>
-                    </div>
-                  ) : (
-                    <button className={`btn wide ${picking ? 'on' : ''}`} onClick={() => setPicking(!picking)} title="Если на листе есть слова, написанные той же ручкой">
-                      {picking ? 'Щёлкните по слову на фото…' : 'Взять цвет с настоящей ручки'}
-                    </button>
-                  ))}
-                <LookSlider label="Густота чернил" hint="толщина слоя: меньше — бледнее и прозрачнее" min={0.15} max={1} step={0.01} value={look.density} onChange={(v) => changeLook({ density: v })} />
-                <LookSlider
-                  label="Размытость, px"
-                  hint="как у самого снимка: 0 — идеально резко"
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  value={blurValue}
-                  onChange={(v) => setBlurGain(v / (shownDesk?.measure?.sigma ?? FALLBACK_BLUR))}
-                />
-                <LookSlider label="Шум, ×" hint="зерно камеры под чернилами: 1 — как на самом снимке" min={0} max={3} step={0.05} value={look.grain} onChange={(v) => changeLook({ grain: v })} />
-                <LookSlider label="Фактура бумаги, ×" hint="насколько волокна бумаги проступают в чернилах" min={0} max={2} step={0.05} value={look.texture} onChange={(v) => changeLook({ texture: v })} />
-                <LookSlider label="До / после" hint="слева — исходное фото" min={0} max={1} step={0.01} value={split} onChange={setSplit} />
-                {measureNote && (
-                  <p className="muted small">
-                    По снимку: {measureNote}.{' '}
+                      </Section>
+                    );
+                  })()}
+                  {cur.bend && (
+                    <Section
+                      title="Изогнутый лист"
+                      hint={`Края выгнуты дугой — это учтено.${paperKind !== 'plain' ? ' На линованном листе сетка сама подстроится под линии на шаге «Помехи».' : ''}`}
+                    >
+                      <p className="small">Края выгнуты до {num(cur.bend.max)} px.</p>
+                    </Section>
+                  )}
+                </>
+              )}
+
+              {step === 2 && cur && (
+                <>
+                  {!blankId && (
+                  <>
+                  <Section title="Линовка" hint={rulingHint}>
+                    {rulingLine}
+                  </Section>
+                  <Section
+                    title="Поля"
+                    hint="Текст пишется между розовыми линиями. Инструментом «Поля» слева их можно тянуть целиком или за конец — тогда линия поворачивается вокруг другого конца. Линии прилипают к клетке (с Alt — нет), двойной щелчок выпрямляет линию вдоль клетки. Число можно ввести и здесь."
+                    aside={
+                      cur.margins && (
+                        <button className="link-btn" onClick={() => patch(cur.id, { margins: null })} title="Поля, как их нашла программа">
+                          ↺ как найдено
+                        </button>
+                      )
+                    }
+                  >
+                    <ul className="desk-margins">
+                      {SIDES.map(([side, name]) => {
+                        const m = marginsOf(cur);
+                        const v = m[side];
+                        const [pw, ph] = paperFor(cur);
+                        const fallback = { left: 20, right: pw - 10, top: 10, bottom: ph - 10 }[side];
+                        // A new line goes along the printed ones; one turned off them shows its other end too.
+                        const straight = (at: number) => marginLines({ ...NO_MARGINS, [side]: at }, hasRuling(cur) ? (cur.ruling?.slope ?? 0) : 0, [pw, ph])[side]!;
+                        const turned = v !== null && Math.abs(v.b - straight(v.a).b) >= 0.05;
+                        const commit = (input: HTMLInputElement) => {
+                          const a = Number(input.value.replace(',', '.'));
+                          if (v && Number.isFinite(a) && Math.abs(a - v.a) >= 0.05) patch(cur.id, { margins: { ...m, [side]: { a, b: a + (v.b - v.a) } } });
+                        };
+                        return (
+                          <li key={side}>
+                            <span>{name}</span>
+                            {v !== null ? (
+                              <>
+                                <input
+                                  key={v.a.toFixed(1)}
+                                  className="desk-mm-input"
+                                  defaultValue={num(v.a)}
+                                  inputMode="decimal"
+                                  aria-label={`Поле ${name}, мм`}
+                                  title={side === 'left' || side === 'right' ? 'у верхнего края, мм' : 'у левого края, мм'}
+                                  onBlur={(e) => commit(e.currentTarget)}
+                                  onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                                />
+                                <span className="muted small desk-mm-end">{turned ? `→ ${num(v.b)}` : 'мм'}</span>
+                                <button className="desk-x" aria-label={`Убрать поле ${name}`} title="Убрать" onClick={() => patch(cur.id, { margins: { ...m, [side]: null } })}>
+                                  <CloseIcon />
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                className="link-btn"
+                                onClick={() => {
+                                  patch(cur.id, { margins: { ...m, [side]: straight(fallback) } });
+                                  setTool('margins');
+                                }}
+                              >
+                                + добавить
+                              </button>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </Section>
+                  </>
+                  )}
+                  <Section title="Предметы на листе" hint="Красным — где текст не пишется: ручка, пальцы, всё, что не похоже на бумагу. Кисти слева добавляют красное или возвращают бумагу.">
+                    <p className="small">{cur.maskKey === keyOf(cur) && cur.mask ? `Найдено: ${cur.mask.objects}` : 'Ищу…'}</p>
+                  </Section>
+                </>
+              )}
+
+              {step === 3 && (
+                <>
+                  {(pageCount > 1 || desks.length > 1) && (
+                    <Section title="Лист документа" hint="Какой лист документа сейчас на фото. Если фото несколько, каждому листу можно дать своё: выберите лист и щёлкните по фото внизу.">
+                      {pageCount > 1 && (
+                        <div className="desk-pager">
+                          <button className="btn small" disabled={page === 0} onClick={() => setPage(page - 1)} aria-label="Предыдущий лист">
+                            ‹
+                          </button>
+                          <span>
+                            {page + 1} из {pageCount}
+                          </span>
+                          <button className="btn small" disabled={page >= pageCount - 1} onClick={() => setPage(page + 1)} aria-label="Следующий лист">
+                            ›
+                          </button>
+                        </div>
+                      )}
+                      {desks.length > 1 && (
+                        <>
+                          <Pill
+                            value={assign}
+                            onChange={setAssign}
+                            options={[
+                              ['one', 'одно фото на все'],
+                              ['each', 'своё для листа'],
+                            ]}
+                          />
+                          <p className="muted small">На фото {desks.findIndex((d) => d.id === shownDesk?.id) + 1}: щёлкните по другому внизу, чтобы сменить.</p>
+                        </>
+                      )}
+                    </Section>
+                  )}
+                  {!blankId && (!isA4(paperMm) || sheet.paper !== 'plain') && (
+                    <Section title="Текст" hint={reflowNote ?? 'Как текст ложится на лист.'}>
+                      <Pill
+                        value={sheet.mode}
+                        onChange={(mode) => changeSheet({ mode })}
+                        options={[
+                          ['document', 'как в документе', 'Те же строки и те же листы, что в редакторе'],
+                          ['fit', 'заполнить лист', 'Текст заново разбит по листу: на него войдёт больше'],
+                        ]}
+                      />
+                      {layout?.ref && (
+                        <>
+                          <div className="desk-field">
+                            <span>Строка через, {layout.ref.lines.kind === 'grid' ? 'клеток' : 'линеек'}</span>
+                            <Pill value={sheet.every} onChange={(every) => changeSheet({ every })} options={[null, 1, 2, 3].map((n) => [n, n ?? 'авто'] as [number | null, ReactNode])} />
+                          </div>
+                          <label className="slider" title="Высота строки букв в доле строки тетради: меньше — мельче буквы">
+                            <span>
+                              Размер букв, % строки
+                              <output>
+                                {sheet.letters !== null && (
+                                  <button className="link-btn" onClick={() => changeSheet({ letters: null })}>
+                                    ↺ авто{' '}
+                                  </button>
+                                )}
+                                {Math.round(100 * (sheet.letters ?? lettersNow ?? 1))}
+                              </output>
+                            </span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={1.3}
+                              step={0.05}
+                              value={sheet.letters ?? lettersNow ?? 1}
+                              onChange={(e) => changeSheet({ letters: Number(e.target.value) })}
+                            />
+                          </label>
+                        </>
+                      )}
+                      {layout?.ref?.lines.kind === 'grid' && (
+                        <label className="check" title="Единица чертежа — целое число клеток, оси идут по линиям клетки">
+                          <input type="checkbox" checked={sheet.squares} onChange={(e) => changeSheet({ squares: e.target.checked })} />
+                          Чертежи по клеткам
+                        </label>
+                      )}
+                    </Section>
+                  )}
+                  {shownDesk && (
+                    <Section
+                      title="Съёмка"
+                      hint="Как снимок «снят». Когда края листа видны, перспектива и изгиб берутся с самого снимка. Если лист занимает весь кадр, наклон телефона ищется по прямым линиям на снимке (строки и клетки тетради, края стола и других листов, рамки): они сходятся вдали. Если линий нет: при ровном свете — как страница из приложения-сканера (свет выровнен, лист прямой); при неровном на бланке камера досоздаётся. Наклон можно поправить ползунками; объектив чуть выгибает линии у краёв, бумага слегка волнится там, где на снимке тени."
+                    >
+                      <Pill
+                        value={capture.mode}
+                        onChange={(mode) => changeCapture({ mode })}
+                        options={[
+                          ['auto', 'авто'],
+                          ['photo', 'как снимок'],
+                          ['scan', 'как сканер'],
+                        ]}
+                      />
+                      {(() => {
+                        const how = captureFor(shownDesk);
+                        if (how !== 'camera')
+                          return (
+                            <p className="muted small">
+                              {how === 'scan'
+                                ? 'Как страница сканер-приложения: свет выровнен, лист прямой.'
+                                : 'Как на снимке: перспектива и изгиб листа — с фото.'}
+                            </p>
+                          );
+                        const found = sureTilt(shownDesk.tilt) ? shownDesk.tilt : null;
+                        const angles = shownDesk.handTilt ?? (found ? anglesOf(found.rot) : madeUpAngles(capture.seed));
+                        return (
+                          <>
+                            <p className="muted small">
+                              {shownDesk.handTilt
+                                ? `Лист во весь кадр — наклон задан вручную: ${describeTilt(angles)}.`
+                                : found
+                                  ? `Лист во весь кадр — перспектива найдена по линиям на снимке${found.by === 'one' ? ' (по одному направлению)' : ''}: ${describeTilt(angles)}.`
+                                  : `Лист во весь кадр, прямых линий на снимке нет — наклон досоздан: ${describeTilt(angles)}.`}{' '}
+                              {shownDesk.handTilt ? (
+                                <button className="link-btn" onClick={() => setHandTilt(shownDesk, null)} title="Забыть ручной наклон">
+                                  ↺ {found ? 'как найдено' : 'досоздать'}
+                                </button>
+                              ) : (
+                                <button className="link-btn" onClick={() => changeCapture({ seed: capture.seed + 1 })} title={found ? 'Другой объектив и место листа в кадре' : 'Другой наклон телефона и другой объектив'}>
+                                  ↺ другая камера
+                                </button>
+                              )}
+                            </p>
+                            <TiltSliders value={angles} onChange={(a) => setHandTilt(shownDesk, a)} />
+                          </>
+                        );
+                      })()}
+                    </Section>
+                  )}
+                  {blankId && (
+                    <Section
+                      title="Печать"
+                      hint="Бланк печатается на чистый лист с фото, поверх пишет ручка. Альбомный бланк на книжном листе повёрнут, как его кладёт принтер. Принтер не печатает идеально ровно: лёгкий перекос и сдвиг (до 0,3° и 1 мм) делают снимок правдоподобнее."
+                    >
+                      {!blankRow && <p className="muted small">Бланк этого документа не нашёлся: печатать нечего.</p>}
+                      <Pill
+                        value={print.color ? 'color' : 'bw'}
+                        onChange={(v) => changePrint({ color: v === 'color' })}
+                        options={[
+                          ['bw', 'ч/б принтер', 'Чёрно-белый лазерный: цветное выйдет серым'],
+                          ['color', 'цветной', 'Цвета бланка, как на картинке'],
+                        ]}
+                      />
+                      {layout && layout.size.w > layout.size.h !== layout.paper.w > layout.paper.h && (
+                        <div className="desk-field">
+                          <span>Верх бланка</span>
+                          <Pill
+                            value={print.turnAuto ? 0 : print.turn}
+                            onChange={(turn) => changePrint(turn === 0 ? { turnAuto: true } : { turnAuto: false, turn: turn as 1 | -1 })}
+                            options={[
+                              [0, 'авто', 'Так, чтобы бланк на снимке стоял прямо'],
+                              [-1, '← слева', 'Верх бланка у левого края листа'],
+                              [1, 'справа →', 'Верх бланка у правого края листа'],
+                            ]}
+                          />
+                        </div>
+                      )}
+                      <div className="desk-field">
+                        <label className="check" title="Лёгкий поворот и сдвиг печати, как у настоящего принтера">
+                          <input type="checkbox" checked={print.skew} onChange={(e) => changePrint({ skew: e.target.checked })} />
+                          Чуть криво, как принтер
+                        </label>
+                        {print.skew && (
+                          <button className="link-btn" onClick={() => changePrint({ seed: print.seed + 1 })} title="Другой перекос">
+                            ↺ другой
+                          </button>
+                        )}
+                      </div>
+                      <LookSlider label="Густота тонера" hint="Меньше — бледнее, как при экономии тонера" min={0.3} max={1.6} step={0.05} value={print.toner} onChange={(v) => changePrint({ toner: v })} />
+                      <div className="desk-field">
+                        <span>Принтер</span>
+                        <Pill
+                          value={wear.printer}
+                          onChange={(printer) => void saveWear({ ...wear, printer })}
+                          options={[
+                            ['new', 'новый', 'Почти как в файле: чуть серый чёрный, мягкие края'],
+                            ['usual', 'обычный', 'Офисный лазерный: полосы по ходу бумаги, неровная плотность, редкие точки тонера'],
+                            ['tired', 'уставший', 'Изношенный барабан: заметные светлые полосы, бледный край, грязь, иногда повтор печати ниже'],
+                          ] as [PrinterKind, ReactNode, string][]}
+                        />
+                        <button className="link-btn" onClick={() => void saveWear({ ...wear, printerSeed: wear.printerSeed + 1 })} title="Другие полосы, пятна и точки">
+                          ↺ другой принтер
+                        </button>
+                      </div>
+                    </Section>
+                  )}
+                  <Section
+                    title="Ручка"
+                    hint="Шариковая, гелевая или карандаш. Цвет можно взять с настоящей ручки: пипетка слева, затем щелчок по слову, написанному ею на этом листе."
+                  >
+                    <Pill value={look.pen} onChange={(pen) => changeLook({ pen })} options={PENS.map(([k, name]) => [k, name] as [PenKind, ReactNode])} />
+                    {look.pen !== 'pencil' && calib && (
+                      <div className="desk-calib">
+                        <span className="desk-swatch" style={{ background: calibSwatch ?? undefined }} />
+                        <span className="small">
+                          Цвет настоящей ручки
+                          {calib.mm > 0 && penMm > 0 && (
+                            <Hint>
+                              Штрих настоящей ручки {num(calib.mm, 2)} мм, у пера почерка {num(penMm, 2)} мм.
+                            </Hint>
+                          )}
+                        </span>
+                        <button className="link-btn" onClick={() => setCalib(null)}>
+                          сбросить
+                        </button>
+                      </div>
+                    )}
+                    <LookSlider label="Густота чернил" hint="Толщина слоя: меньше — бледнее и прозрачнее" min={0.15} max={1} step={0.01} value={look.density} onChange={(v) => changeLook({ density: v })} />
+                  </Section>
+                  <details className="desk-more">
+                    <summary>
+                      Как на снимке
+                      <Hint>Размытость, шум и фактура берутся с самого снимка; трогать их нужно редко.{measureNote ? ` По снимку: ${measureNote}.` : ''}</Hint>
+                    </summary>
+                    <LookSlider
+                      label="Размытость, px"
+                      hint="Как у самого снимка: 0 — идеально резко"
+                      min={0}
+                      max={3}
+                      step={0.05}
+                      value={blurValue}
+                      onChange={(v) => setBlurGain(v / (shownDesk?.measure?.sigma ?? FALLBACK_BLUR))}
+                    />
+                    <LookSlider label="Шум, ×" hint="Зерно камеры под чернилами: 1 — как на самом снимке" min={0} max={3} step={0.05} value={look.grain} onChange={(v) => changeLook({ grain: v })} />
+                    <LookSlider label="Фактура бумаги, ×" hint="Насколько волокна бумаги проступают в чернилах" min={0} max={2} step={0.05} value={look.texture} onChange={(v) => changeLook({ texture: v })} />
                     <button
                       className="link-btn"
                       onClick={() => {
@@ -1384,27 +2049,32 @@ export function DeskDialog(props: Props) {
                         changeLook({ grain: 1, texture: 1 });
                       }}
                     >
-                      ↺ Как на снимке
+                      ↺ как на снимке
                     </button>
-                  </p>
-                )}
-                <label className="check">
-                  <input type="checkbox" checked={actual} onChange={(e) => setActual(e.target.checked)} />
-                  Масштаб 1:1
-                </label>
-                <button className="btn primary wide desk-next" disabled={!inkReady || !!busy} onClick={() => void savePages([page])}>
-                  Сохранить JPG{pageCount > 1 ? ` (лист ${page + 1})` : ''}
-                </button>
-                {pageCount > 1 && (
-                  <button className="btn wide" disabled={!inkReady || !!busy} onClick={() => void savePages(Array.from({ length: pageCount }, (_, i) => i))}>
-                    Сохранить все листы ({pageCount})
+                  </details>
+                </>
+              )}
+            </div>
+
+            <footer className="desk-panel-foot">
+              {step === 0 && desks.length > 0 && next(1, 'Дальше: лист')}
+              {step === 1 && next(2, 'Дальше: помехи', !valid)}
+              {step === 2 && next(3, 'Дальше: чернила', !allValid)}
+              {step === 3 && (
+                <>
+                  <button className="btn primary wide" disabled={!inkReady || !!busy} onClick={() => void savePages([page])} title={fileName(page)}>
+                    Сохранить JPG{pageCount > 1 ? ` (лист ${page + 1})` : ''}
                   </button>
-                )}
-                <p className="muted small">{fileName(page)}</p>
-              </>
-            )}
+                  {pageCount > 1 && (
+                    <button className="btn wide" disabled={!inkReady || !!busy} onClick={() => void savePages(Array.from({ length: pageCount }, (_, i) => i))}>
+                      Все листы ({pageCount})
+                    </button>
+                  )}
+                </>
+              )}
+            </footer>
           </aside>
-        </div>
+        )}
 
         <input
           ref={fileRef}
@@ -1421,6 +2091,33 @@ export function DeskDialog(props: Props) {
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** The camera's turn by three sliders, degrees; the sheet is drawn again once a slider rests. */
+function TiltSliders({ value, onChange }: { value: Angles; onChange: (a: Angles) => void }) {
+  const [v, setV] = useState(value);
+  const key = JSON.stringify(value);
+  useEffect(() => setV(value), [key]);
+  useEffect(() => {
+    if (JSON.stringify(v) === key) return;
+    const t = setTimeout(() => onChange(v), 250);
+    return () => clearTimeout(t);
+  }, [v]);
+  const one = (k: keyof Angles, label: string, hint: string, max: number) => (
+    <label className="slider" title={hint}>
+      <span>
+        {label} <output>{num(v[k])}°</output>
+      </span>
+      <input type="range" min={-max} max={max} step={0.5} value={v[k]} onChange={(e) => setV({ ...v, [k]: Number(e.target.value) })} />
+    </label>
+  );
+  return (
+    <>
+      {one('pitch', 'Наклон вверх-вниз', 'Меньше нуля — верх листа дальше от камеры, больше — низ', 25)}
+      {one('yaw', 'Наклон вбок', 'Больше нуля — левый край листа дальше от камеры, меньше — правый', 25)}
+      {one('roll', 'Поворот', 'Телефон повёрнут вокруг объектива', 10)}
+    </>
   );
 }
 

@@ -2,6 +2,7 @@
 //
 // Coordinates are font units: 1000 per em, y up, baseline at y = 0.
 
+import type { DocLayout } from '../editor/docLayout';
 import type { PageSetup } from '../editor/page';
 
 export const UNITS_PER_EM = 1000;
@@ -98,6 +99,8 @@ export interface HandDocument {
   content: DocContent;
   /** Page setup (margins, paper, pen colour); defaults when missing. */
   page?: Partial<PageSetup>;
+  /** Where the editor last put the lines (the rendered view writes them there); missing: never measured. */
+  layout?: DocLayout;
   createdAt: number;
   updatedAt: number;
 }

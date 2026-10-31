@@ -37,17 +37,31 @@ export const exportHistory = () => getSetting<ExportEntry[]>(HISTORY_KEY, []);
 export const clearExportHistory = () => setSetting(HISTORY_KEY, []);
 
 /**
- * Saves an exported file and remembers it. The desktop app writes it into the
- * Downloads folder itself (so it knows where the file is and can show it); a
- * browser downloads it the usual way.
+ * A new folder for one export (desktop app): Downloads\Handbook\<date>_<n>,
+ * the n-th export of the day; null in a browser, which decides itself.
+ * An export of several files saves them all into one folder.
  */
-export async function saveFile(blob: Blob, filename: string): Promise<ExportEntry> {
+export async function exportFolder(): Promise<string | null> {
+  if (!isDesktop()) return null;
+  const { invoke } = await import('@tauri-apps/api/core');
+  const d = new Date();
+  const two = (n: number) => String(n).padStart(2, '0');
+  return invoke<string>('new_export_folder', { date: `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}` });
+}
+
+/**
+ * Saves an exported file and remembers it. The desktop app writes it into
+ * `folder` (see `exportFolder`; a new one when not given) itself, so it knows
+ * where the file is and can show it; a browser downloads it the usual way.
+ */
+export async function saveFile(blob: Blob, filename: string, folder?: string | null): Promise<ExportEntry> {
   let path: string | null = null;
   if (isDesktop()) {
     const { invoke } = await import('@tauri-apps/api/core');
     try {
+      const dir = folder ?? (await exportFolder());
       path = await invoke<string>('save_download', new Uint8Array(await blob.arrayBuffer()), {
-        headers: { 'x-file-name': encodeURIComponent(filename) },
+        headers: { 'x-file-name': encodeURIComponent(filename), ...(dir ? { 'x-folder': encodeURIComponent(dir) } : {}) },
       });
     } catch (err) {
       alert(`Не удалось сохранить «${filename}»: ${String(err)}`);

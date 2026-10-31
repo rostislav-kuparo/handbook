@@ -176,6 +176,13 @@ fn capsule(a: Disc, b: Disc) -> Vec<[f64; 2]> {
 /// (the same curves TrueType draws from consecutive off-curve points), which
 /// smooths away the faceting. `flip` maps font y-up to SVG y-down.
 pub fn svg_path(contours: &[Vec<[f64; 2]>], dx: f64, dy: f64, flip: bool, out: &mut String) {
+    svg_path_along(contours, dx, |_| dy, flip, out);
+}
+
+/// The same, moved down by `dy(x)` at each point's final x: a line that
+/// drifts as it runs carries the letters along it, and two joined letters
+/// still meet where they touch.
+pub fn svg_path_along(contours: &[Vec<[f64; 2]>], dx: f64, dy: impl Fn(f64) -> f64, flip: bool, out: &mut String) {
     use std::fmt::Write;
     let sy = if flip { -1.0 } else { 1.0 };
     for c in contours {
@@ -183,7 +190,10 @@ pub fn svg_path(contours: &[Vec<[f64; 2]>], dx: f64, dy: f64, flip: bool, out: &
         if n < 3 {
             continue;
         }
-        let pt = |i: usize| [c[i % n][0] + dx, c[i % n][1] * sy + dy];
+        let pt = |i: usize| {
+            let x = c[i % n][0] + dx;
+            [x, c[i % n][1] * sy + dy(x)]
+        };
         let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
         let start = mid(pt(n - 1), pt(0));
         let _ = write!(out, "M{:.1} {:.1}", start[0], start[1]);

@@ -86,6 +86,8 @@ export interface CharStyles {
   skeleton?: boolean;
   /** The previous paragraph's `deal` (none: the start of the text). */
   deal?: Deal;
+  /** Where lines start (code points), as the editor broke them; empty: the engine breaks by width. */
+  breaks?: number[];
 }
 
 export const engine = {

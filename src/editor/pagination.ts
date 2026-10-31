@@ -1,9 +1,11 @@
 import { Extension } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
+import type { NodeLayout } from './docLayout';
 import { LINE_HEIGHT_EM } from './layout';
 import { lineSegments } from './lines';
-import { PITCH, type Geometry } from './page';
+import type { Geometry } from './page';
+import { zoomOf } from './zoom';
 
 // Editor plugins are set up once per editor: reload the page instead of hot-swapping.
 import.meta.hot?.accept(() => location.reload());
@@ -11,7 +13,7 @@ import.meta.hot?.accept(() => location.reload());
 /**
  * Word-like pages for one continuous ProseMirror editor.
  *
- * Text flows in a single column laid over a stack of A4 sheets. After every
+ * Text flows in a single column laid over a stack of sheets (A4, or a blank's paper). After every
  * change the lines are measured; when a line (or an HTML block) would cross the
  * bottom margin of a sheet, an invisible spacer widget is inserted before it,
  * pushing it to the top of the next sheet. Spacers are decorations — they are
@@ -67,12 +69,22 @@ interface Unit {
   top: number;
   height: number;
   block: boolean;
+  /** The top-level node it belongs to, and where its line starts in that paragraph's text (code points). */
+  node: number;
+  start: number;
 }
 
-function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: number } | null {
+/**
+ * Lines and blocks, measured: the spacers that push them past page breaks,
+ * how many sheets there are, and where every line and block ends up (see
+ * `NodeLayout`) for the rendered view.
+ */
+function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: number; layout: (NodeLayout | null)[] } | null {
   const stack = view.dom.closest('.paper-stack');
   if (!stack) return null;
-  const top0 = stack.getBoundingClientRect().top;
+  // Screen positions are zoomed with the sheets: everything below is in sheet pixels.
+  const z = zoomOf(stack);
+  const top0 = stack.getBoundingClientRect().top / z;
   const fontPx = parseFloat(getComputedStyle(view.dom).fontSize) || 16;
   const lh = fontPx * LINE_HEIGHT_EM;
   const current = paginationKey.getState(view.state)?.spacers ?? [];
@@ -82,23 +94,26 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
   const units: Unit[] = [];
   // Floating blocks take no room in the text, but the paper must reach them.
   let floatBottom = 0;
-  view.state.doc.forEach((node, offset) => {
+  const layout: (NodeLayout | null)[] = [];
+  view.state.doc.forEach((node, offset, index) => {
+    layout[index] = null;
     const dom = view.nodeDOM(offset) as HTMLElement | null;
     if (!dom || !(dom instanceof HTMLElement)) return;
     if (node.type.name === 'htmlBlock') {
       if (node.attrs.float) {
         // The node view's outer element stays in the flow with no height; measure the block itself.
         const el = dom.querySelector('.html-block') ?? dom;
-        floatBottom = Math.max(floatBottom, el.getBoundingClientRect().bottom - top0);
+        floatBottom = Math.max(floatBottom, el.getBoundingClientRect().bottom / z - top0);
         return;
       }
       const r = dom.getBoundingClientRect();
-      units.push({ pos: offset, top: r.top - top0 - blockBefore(offset), height: r.height, block: true });
+      units.push({ pos: offset, top: r.top / z - top0 - blockBefore(offset), height: r.height / z, block: true, node: index, start: 0 });
       return;
     }
-    const r = dom.getBoundingClientRect();
+    const rect = dom.getBoundingClientRect();
+    const r = { top: rect.top / z };
     const paraTop = r.top - top0 - blockBefore(offset);
-    units.push({ pos: offset, top: paraTop, height: lh, block: true });
+    units.push({ pos: offset, top: paraTop, height: lh, block: true, node: index, start: 0 });
     // Further lines of the paragraph: find where wrapped lines start.
     const start = offset + 1;
     const text = node.textBetween(0, node.content.size, undefined, '￼');
@@ -111,7 +126,9 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
       // The glyph box sits 0.225em below its line top; small sag offsets are absorbed by rounding.
       const k = Math.round((seg.top - r.top - inner - 0.225 * fontPx) / lh);
       if (k > lastLine) {
-        units.push({ pos: q, top: paraTop + k * lh, height: lh, block: false });
+        // The line's start in the text as the ink renderer counts it: text only, by code points.
+        const before = node.textBetween(0, q - start, undefined, () => '');
+        units.push({ pos: q, top: paraTop + k * lh, height: lh, block: false, node: index, start: [...before].length });
         lastLine = k;
       }
     }
@@ -122,7 +139,7 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
   let bottom = 0;
   for (const u of units) {
     let y = u.top + shift;
-    const p = Math.max(0, Math.floor(y / PITCH));
+    const p = Math.max(0, Math.floor(y / geo.pitch));
     const cTop = geo.contentTop(p);
     const cBottom = geo.contentBottom(p);
     if (p > 0 && y < cTop - 0.5) {
@@ -137,24 +154,35 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
       y = next;
     }
     bottom = Math.max(bottom, y + u.height);
+    // Where it ends up: its sheet and its top in the writable area, on the line grid.
+    const page = Math.max(0, Math.floor((y + 0.5) / geo.pitch));
+    const at: [number, number] = [page, Math.round((y - geo.contentTop(page)) / lh) * lh];
+    const n = (layout[u.node] ??= { starts: [], at: [] });
+    n.starts.push(u.start);
+    n.at.push(at);
   }
   const last = Math.max(bottom, floatBottom);
-  return { spacers, pages: Math.max(1, Math.floor(last / PITCH) + 1) };
+  return { spacers, pages: Math.max(1, Math.floor(last / geo.pitch) + 1), layout };
 }
 
 function same(a: Spacer[], b: Spacer[]): boolean {
   return a.length === b.length && a.every((s, i) => s.pos === b[i].pos && s.block === b[i].block && Math.abs(s.height - b[i].height) < 1);
 }
 
-export const Pagination = Extension.create<{ onPages: (pages: number) => void; getGeometry: () => Geometry | null }>({
+export const Pagination = Extension.create<{
+  onPages: (pages: number) => void;
+  getGeometry: () => Geometry | null;
+  /** Where the lines and blocks are once the pages settle, with the document they belong to. */
+  onLayout: (layout: (NodeLayout | null)[], doc: EditorView['state']['doc']) => void;
+}>({
   name: 'pagination',
 
   addOptions() {
-    return { onPages: () => {}, getGeometry: () => null };
+    return { onPages: () => {}, getGeometry: () => null, onLayout: () => {} };
   },
 
   addProseMirrorPlugins() {
-    const { onPages, getGeometry } = this.options;
+    const { onPages, getGeometry, onLayout } = this.options;
     return [
       new Plugin<PageState>({
         key: paginationKey,
@@ -174,6 +202,7 @@ export const Pagination = Extension.create<{ onPages: (pages: number) => void; g
         view(view) {
           let frame = 0;
           let pages = 0;
+          let told = '';
           const schedule = () => {
             cancelAnimationFrame(frame);
             frame = requestAnimationFrame(() => {
@@ -188,6 +217,12 @@ export const Pagination = Extension.create<{ onPages: (pages: number) => void; g
               const current = paginationKey.getState(view.state)?.spacers ?? [];
               if (!same(current, result.spacers)) {
                 view.dispatch(view.state.tr.setMeta(paginationKey, result.spacers).setMeta('addToHistory', false));
+              }
+              // The places are measured with the new spacers already counted in.
+              const layout = JSON.stringify(result.layout);
+              if (layout !== told) {
+                told = layout;
+                onLayout(result.layout, view.state.doc);
               }
             });
           };

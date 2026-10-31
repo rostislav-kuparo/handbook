@@ -16,6 +16,8 @@ const SLIDERS: { key: keyof typeof DRAW_PEN_RANGES; label: string; hint: string;
   { key: 'weight', label: 'Толщина', hint: 'относительно пера почерка', unit: '×' },
   { key: 'pressure', label: 'Нажим', hint: 'насколько толщина «дышит» вдоль линии: 0 — ровная' },
   { key: 'overshoot', label: 'Заход за концы', hint: '0 — линия ровно до точки, больше — дальше за неё' },
+  { key: 'points', label: 'Небрежность точек', hint: '0 — все точки одинаковые и ровные; больше — разный размер, чуть овальные, кружок не всегда замкнут и чуть мимо места' },
+  { key: 'joins', label: 'Стыки с точками', hint: '0 — линии ровно до кружка точки; больше — то не доходят, то касаются, то заходят внутрь, у каждого конца по-своему' },
 ];
 
 interface Props {
@@ -67,6 +69,12 @@ export function DrawPenPicker({ value, onChange, textInk }: Props) {
           Подписи — ручкой, как текст
         </label>
       )}
+      {pencil && (
+        <label className="check inline small" title="Окружности и дуги от 6 мм — ровный радиус и нажим, прокол иглы в центре. На бланке — всегда">
+          <input type="checkbox" checked={value.compass} onChange={(e) => onChange({ ...value, compass: e.target.checked })} />
+          Дуги циркулем
+        </label>
+      )}
       <div className="draw-pen-sliders">
         {SLIDERS.map((s) => {
           const [min, max] = DRAW_PEN_RANGES[s.key];
@@ -93,10 +101,10 @@ export function DrawPenPicker({ value, onChange, textInk }: Props) {
         {SLIDERS.some((s) => value[s.key] !== DEFAULT_DRAW_PEN[s.key]) && (
           <button
             className="link-btn small"
-            onClick={() => onChange({ ...value, wobble: 1, weight: 1, pressure: 1, overshoot: 1 })}
-            title="Кривизна, толщина, нажим и заход — как у пера почерка"
+            onClick={() => onChange({ ...value, wobble: 1, weight: 1, pressure: 1, overshoot: 1, points: 1, joins: 1 })}
+            title="Кривизна, толщина, нажим, заход, точки и стыки — как обычно"
           >
-            Сбросить линии
+            Сбросить линии и точки
           </button>
         )}
       </div>

@@ -9,8 +9,24 @@ const PAD = 28;
 /** Points per side when a curved side is drawn. */
 const SIDE_STEPS = 32;
 
-/** A point to drag: a corner, or a node of the grid of a curved sheet. */
-type Handle = { kind: 'corner'; i: number } | { kind: 'node'; i: number };
+/** A point to drag: a corner, a node of the grid of a curved sheet, or an end of a guide line (line · 2 + end). */
+type Handle = { kind: 'corner'; i: number } | { kind: 'node'; i: number } | { kind: 'guide'; i: number };
+
+/** Colours of the two directions of lines: across the sheet, down it. */
+const LINE_COLORS = ['#ff6b9a', '#3fd4ff'];
+
+/** The photo's frame grown to hold the corners outside it (by at most half the photo each way): x0, y0, x1, y1. */
+function reachOf(photo: Photo, corners: Pt[]): [number, number, number, number] {
+  const xs = corners.map((c) => c[0]);
+  const ys = corners.map((c) => c[1]);
+  const [mx, my] = [photo.width / 2, photo.height / 2];
+  return [
+    Math.max(-mx, Math.min(0, ...xs)),
+    Math.max(-my, Math.min(0, ...ys)),
+    Math.min(photo.width + mx, Math.max(photo.width, ...xs)),
+    Math.min(photo.height + my, Math.max(photo.height, ...ys)),
+  ];
+}
 
 interface Props {
   photo: Photo;
@@ -27,6 +43,12 @@ interface Props {
   onRelease?: (index: number, free: boolean, corners: Pt[]) => void;
   /** A corner was moved by the keyboard. */
   onNudge?: (index: number) => void;
+  /** Straight lines found on the photo, shown over it: [ax, ay, bx, by, direction]. */
+  found?: number[][] | null;
+  /** Lines put along the sheet by hand ([ax, ay, bx, by]; two across it, two down it): only their ends are dragged then. */
+  guides?: number[][] | null;
+  /** The guides moved; `done`: a drag or a key press ended. */
+  onGuides?: (guides: number[][], done: boolean) => void;
 }
 
 /**
@@ -35,7 +57,7 @@ interface Props {
  * pixels of the full-size photo around it; Shift moves it eight times slower,
  * arrow keys by a quarter of a pixel.
  */
-export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, onRelease, onNudge }: Props) {
+export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, onRelease, onNudge, found, guides, onGuides }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -46,11 +68,21 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
   /** The point being dragged: where it is now, where it and (a node) its offset were at the start. */
   const drag = useRef<{ h: Handle; last: Pt; at: Pt; start: Pt; offset: Pt; moved: boolean } | null>(null);
   const dpr = window.devicePixelRatio || 1;
+  // The keys move what can be dragged: the guides' ends while they are shown.
+  const guiding = !!guides;
+  useEffect(() => setActive(guiding ? { kind: 'guide', i: 0 } : { kind: 'corner', i: 0 }), [guiding]);
 
-  // Fit the photo into the box, with room around it for corners outside the frame.
-  const s = box.w > 0 ? Math.min((box.w - 2 * PAD) / photo.width, (box.h - 2 * PAD) / photo.height) : 0;
-  const ox = (box.w - photo.width * s) / 2;
-  const oy = (box.h - photo.height * s) / 2;
+  // What the view holds: the photo and the corners outside its frame (a sheet bigger than the frame), kept still while a point is dragged.
+  const [reach, setReach] = useState(() => reachOf(photo, corners));
+  const [settled, setSettled] = useState(0);
+  useEffect(() => {
+    if (!drag.current) setReach(reachOf(photo, corners));
+  }, [photo, corners, settled]);
+  const [x0, y0, x1, y1] = reach;
+  // Fit it into the box, with room around it for the handles.
+  const s = box.w > 0 ? Math.min((box.w - 2 * PAD) / (x1 - x0), (box.h - 2 * PAD) / (y1 - y0)) : 0;
+  const ox = (box.w - (x1 - x0) * s) / 2 - x0 * s;
+  const oy = (box.h - (y1 - y0) * s) / 2 - y0 * s;
   const toScreen = ([x, y]: Pt): Pt => [ox + x * s, oy + y * s];
 
   const map = warpMap({ corners, bulge: bend?.bulge ?? null, grid: bend?.grid ?? null });
@@ -65,7 +97,12 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       }
     }
   }
-  const pointOf = (h: Handle): Pt => (h.kind === 'corner' ? corners[h.i] : (nodes.find((n) => n.i === h.i)?.at ?? corners[0]));
+  const endOf = (i: number): Pt => {
+    const l = guides?.[i >> 1] ?? [0, 0, 0, 0];
+    return i & 1 ? [l[2], l[3]] : [l[0], l[1]];
+  };
+  const pointOf = (h: Handle): Pt =>
+    h.kind === 'corner' ? corners[h.i] : h.kind === 'guide' ? endOf(h.i) : (nodes.find((n) => n.i === h.i)?.at ?? corners[0]);
   /** A side as a polyline in photo px (curved when the sheet is). */
   const sidePoints = (k: number): Pt[] =>
     Array.from({ length: SIDE_STEPS + 1 }, (_, i) => {
@@ -112,8 +149,11 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
 
     const sides = [0, 1, 2, 3].map(sidePoints);
     const outline = sides.flatMap((p) => p.slice(0, -1));
-    // Dim everything but the sheet.
+    // Dim the photo but the sheet.
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, photo.width * s, photo.height * s);
+    ctx.clip();
     ctx.beginPath();
     ctx.rect(0, 0, box.w, box.h);
     outline.map(toScreen).forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
@@ -153,7 +193,52 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
         c.setLineDash([]);
       });
     };
+    /** The guide lines through `at`: each run on dashed across the view (where a pair meets is where it converges), its ends to drag. */
+    const guideLines = (c: CanvasRenderingContext2D, at: (p: Pt) => Pt, width: number) => {
+      guides?.forEach((l, k) => {
+        const [a, b] = [at([l[0], l[1]]), at([l[2], l[3]])];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        const [dx, dy] = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+        const far = 4 * Math.max(box.w, box.h);
+        c.strokeStyle = LINE_COLORS[k >> 1];
+        c.globalAlpha = 0.55;
+        c.lineWidth = width;
+        c.setLineDash([5 * width, 5 * width]);
+        c.beginPath();
+        c.moveTo(a[0] - dx * far, a[1] - dy * far);
+        c.lineTo(b[0] + dx * far, b[1] + dy * far);
+        c.stroke();
+        c.setLineDash([]);
+        c.globalAlpha = 1;
+        c.beginPath();
+        c.moveTo(a[0], a[1]);
+        c.lineTo(b[0], b[1]);
+        c.lineWidth = 3.5 * width;
+        c.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        c.stroke();
+        c.lineWidth = 2 * width;
+        c.strokeStyle = LINE_COLORS[k >> 1];
+        c.stroke();
+      });
+    };
+    if (found && !guides) {
+      ctx.lineCap = 'round';
+      for (const l of found) {
+        const [a, b] = [toScreen([l[0], l[1]]), toScreen([l[2], l[3]])];
+        ctx.beginPath();
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.stroke();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = LINE_COLORS[l[4] ? 1 : 0];
+        ctx.stroke();
+      }
+      ctx.lineCap = 'butt';
+    }
     edges(ctx, toScreen, 1);
+    guideLines(ctx, toScreen, 1);
 
     // «верх» over the top edge, upright along it.
     const [t0, t1] = [toScreen(corners[0]), toScreen(corners[1])];
@@ -195,6 +280,20 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       ctx.stroke();
     });
 
+    guides?.forEach((_, k) =>
+      [0, 1].forEach((e) => {
+        const [x, y] = toScreen(endOf(2 * k + e));
+        const on = isActive({ kind: 'guide', i: 2 * k + e });
+        ctx.beginPath();
+        ctx.rect(x - (on ? 6 : 5), y - (on ? 6 : 5), on ? 12 : 10, on ? 12 : 10);
+        ctx.fillStyle = on ? '#ffffff' : LINE_COLORS[k >> 1];
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+        ctx.stroke();
+      }),
+    );
+
     if (loupe) {
       const c = pointOf(active);
       const [sx, sy] = toScreen(c);
@@ -215,6 +314,7 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       ctx.drawImage(photo.bitmap, c[0] - half, c[1] - half, 2 * half, 2 * half, lx - LOUPE_R, ly - LOUPE_R, 2 * LOUPE_R, 2 * LOUPE_R);
       // The edges near the point, at the loupe's scale.
       edges(ctx, ([x, y]) => [lx + (x - c[0]) * z, ly + (y - c[1]) * z], 0.7);
+      guideLines(ctx, ([x, y]) => [lx + (x - c[0]) * z, ly + (y - c[1]) * z], 0.6);
       ctx.strokeStyle = '#ffb020';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -244,14 +344,23 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       const d = Math.hypot(x - p[0], y - p[1]);
       if (d < dist) [best, dist] = [h, d];
     };
+    if (guides) {
+      guides.forEach((_, k) => [0, 1].forEach((e) => consider({ kind: 'guide', i: 2 * k + e }, endOf(2 * k + e))));
+      return best;
+    }
     corners.forEach((c, i) => consider({ kind: 'corner', i }, c));
     nodes.forEach((n) => consider({ kind: 'node', i: n.i }, n.at));
     return best;
   };
 
+  /** The guides with an end moved to `at`. */
+  const guidesWith = (i: number, at: Pt) => (guides ?? []).map((l, k) => (k === i >> 1 ? (i & 1 ? [l[0], l[1], ...at] : [...at, l[2], l[3]]) : l));
+
   /** Puts a dragged point at `at` (the grid passes through its nodes, so a node moves by its offset). */
   const place = (d: NonNullable<typeof drag.current>) => {
-    if (d.h.kind === 'corner') {
+    if (d.h.kind === 'guide') {
+      onGuides?.(guidesWith(d.h.i, d.at), false);
+    } else if (d.h.kind === 'corner') {
       const i = d.h.i;
       onChange(corners.map((c, k) => (k === i ? d.at : c)));
     } else if (grid) {
@@ -263,7 +372,10 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
 
   /** Moves a point by a photo-px delta (keyboard). */
   const shift = (h: Handle, d: Pt) => {
-    if (h.kind === 'corner') {
+    if (h.kind === 'guide') {
+      const at = endOf(h.i);
+      onGuides?.(guidesWith(h.i, [at[0] + d[0], at[1] + d[1]]), true);
+    } else if (h.kind === 'corner') {
       onChange(corners.map((c, k) => (k === h.i ? [c[0] + d[0], c[1] + d[1]] : c)));
     } else if (grid) {
       onGrid?.({ ...grid, d: grid.d.map((g, k) => (k === h.i ? [g[0] + d[0], g[1] + d[1]] : g)) });
@@ -308,7 +420,9 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
           const d = drag.current;
           drag.current = null;
           setLoupe(false);
-          // The last move may not be drawn yet: hand over where the corner really is.
+          setSettled((n) => n + 1);
+          // The last move may not be drawn yet: hand over where the point really is.
+          if (d?.moved && d.h.kind === 'guide') onGuides?.(guidesWith(d.h.i, d.at), true);
           if (d?.moved && d.h.kind === 'corner') {
             const i = d.h.i;
             onRelease?.(i, e.altKey, corners.map((c, k) => (k === i ? d.at : c)));
@@ -317,6 +431,7 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
         onPointerCancel={() => {
           drag.current = null;
           setLoupe(false);
+          setSettled((n) => n + 1);
         }}
         onKeyDown={(e) => {
           const step = e.shiftKey ? 2 : 0.25;

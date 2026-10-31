@@ -1,4 +1,5 @@
 import type { EditorView } from '@tiptap/pm/view';
+import { zoomOf } from './zoom';
 
 /** A piece of text that sits on one visual line. */
 export interface Segment {
@@ -17,11 +18,17 @@ export interface Segment {
  */
 export function lineSegments(view: EditorView, start: number, text: string, lineHeight: number): Segment[] {
   const out: Segment[] = [];
+  // The screen is zoomed with the sheets: back to sheet pixels.
+  const z = zoomOf(view.dom);
+  const at = (pos: number, side: number) => {
+    const c = view.coordsAtPos(pos, side);
+    return { top: c.top / z, left: c.left / z };
+  };
   for (const m of text.matchAll(/\S+/gu)) {
     const word = m[0];
     const from = start + m.index!;
-    const first = view.coordsAtPos(from, 1);
-    const last = view.coordsAtPos(from + word.length, -1);
+    const first = at(from, 1);
+    const last = at(from + word.length, -1);
     if (Math.abs(last.top - first.top) < lineHeight * 0.5) {
       out.push({ from, text: word, word, top: first.top, left: first.left });
       continue;
@@ -34,7 +41,7 @@ export function lineSegments(view: EditorView, start: number, text: string, line
     for (const ch of word) {
       const pos = from + offset;
       if (offset > 0) {
-        const c = view.coordsAtPos(pos, 1);
+        const c = at(pos, 1);
         if (c.top - segTop > lineHeight * 0.5) {
           out.push({ from: segFrom, text: text.slice(segFrom - start, pos - start), word, top: segTop, left: segLeft });
           segFrom = pos;

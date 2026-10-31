@@ -1,8 +1,10 @@
 // Every command a drawing understands. This one list drives the evaluator,
 // the help window and the instructions for neural nets, so they never disagree.
+import { inclination, quarters, rightTriangle, traces, unfold } from './dg';
+import { projection } from './epure';
 import * as g from './geometry';
 import type { Expr } from './lang';
-import type { Ctx, Shape, SpaceKind, Val, Vec, Vec3 } from './types';
+import type { Ctx, Hatching, Shape, SpaceKind, Val, Vec, Vec3 } from './types';
 
 export type GroupId = 'points' | 'lines' | 'shapes' | 'graphs' | 'space' | 'text' | 'style' | 'view';
 
@@ -75,6 +77,40 @@ function args(list: Expr[], ...counts: number[]) {
 }
 
 const is3 = (p: Vec | Vec3): p is Vec3 => 'z' in p;
+
+/** An angle: written with ° it is in radians already; a bare number past a full turn is taken as degrees (45 for 45°). */
+function angleArg(c: Ctx, e: Expr): number {
+  const v = c.num(e);
+  return Math.abs(v) > 2 * Math.PI + 1e-9 ? (v * Math.PI) / 180 : v;
+}
+
+/** A length of the drawing that must be above zero. */
+function positive(c: Ctx, e: Expr, what: string): number {
+  const v = c.num(e);
+  if (!(v > 0)) throw new Error(`${what} — больше нуля`);
+  return v;
+}
+
+/** Direction, spacing and crosswise hatching from the arguments after the figure. */
+function hatchingOf(c: Ctx, list: Expr[]): Hatching {
+  const angle = list[0] ? angleArg(c, list[0]) : Math.PI / 4;
+  const gap = list[1] ? positive(c, list[1], 'шаг штриховки') : undefined;
+  return { angle, gap, cross: list[2] ? Math.round(c.num(list[2])) === 2 : false };
+}
+
+/** The graph of f from x = a to x = b, as points (the area under or between graphs is cut by them). */
+function graphRun(f: (x: number) => number, a: number, b: number): Vec[] {
+  if (!(b > a)) throw new Error('нужно a < b: штрихуется от x = a до x = b');
+  const n = 160;
+  const out: Vec[] = [];
+  for (let i = 0; i <= n; i++) {
+    const x = a + ((b - a) * i) / n;
+    const y = f(x);
+    if (!Number.isFinite(y)) throw new Error(`функция не определена при x = ${Math.round(x * 100) / 100}: так область не заштриховать`);
+    out.push({ x, y });
+  }
+  return out;
+}
 
 /** The points of a figure: all on the sheet, or all in space (then it is drawn as an epure). */
 function pointsOf(c: Ctx, list: Expr[]): { flat: Vec[] } | { space: Vec3[] } {
@@ -399,6 +435,30 @@ export const COMMANDS: Command[] = [
     },
   },
 
+  {
+    names: ['ШтрихованнаяЛиния', 'HatchedLine', 'ЛинияСоШтриховкой'],
+    group: 'lines',
+    forms: ['@(линия, P)', '@(линия, P, длина, шаг)'],
+    doc: 'Линия с короткими косыми штрихами с той стороны, где лежит точка P: граница полуплоскости, «земля», заделка. Если линия уже на чертеже (по имени), к ней добавляются только штрихи; иначе рисуется и она. Длина штриха и шаг — в единицах чертежа (без них — обычные: 1,5 и 2 мм на бланке).',
+    example: 'A = (-3, 0)\nB = (3, 0)\nl = Segment(A, B)\nHatchedLine(l, (0, -1))',
+    run(a, c) {
+      args(a, 2, 3, 4);
+      const l = lineOf(c, a[0]) as Extract<Shape, { type: 'segment' | 'ray' | 'line' | 'vector' }>;
+      const of = l.type === 'vector' ? 'segment' : l.type;
+      const len = a[2] ? positive(c, a[2], 'длина штриха') : undefined;
+      const gap = a[3] ? positive(c, a[3], 'шаг штрихов') : undefined;
+      let drawn = false;
+      if (a[0].t === 'name') {
+        try {
+          drawn = !c.item(a[0]).hidden;
+        } catch {
+          drawn = false;
+        }
+      }
+      return shape({ type: 'hatched', of, a: l.a, b: l.b, side: c.point(a[1]), line: !drawn, len, gap });
+    },
+  },
+
   // ---------------------------------------------------------------- shapes
   {
     names: ['Окружность', 'Circle'],
@@ -445,6 +505,44 @@ export const COMMANDS: Command[] = [
       const q = c.point(a[1]);
       const m = g.mid(p, q);
       return shape({ type: 'arc', c: m, r: g.dist(p, q) / 2, from: g.angleOf(g.sub(q, m)), sweep: Math.PI });
+    },
+  },
+  {
+    names: ['Штриховка', 'Hatch', 'Заштриховать'],
+    group: 'shapes',
+    forms: ['@(фигура)', '@(фигура, угол, шаг)', '@(фигура, угол, шаг, 2)', '@(f, a, b)', '@(f, g, a, b)', '@(f, g, a, b, угол, шаг)'],
+    doc: 'Штриховка от руки. Фигура — многоугольник или окружность: по имени — штрихуется внутри, сама фигура остаётся как была. @(f, a, b) — область между графиком f и осью x от x = a до x = b; @(f, g, a, b) — между графиками f и g. Угол — направление штрихов, со знаком °, по умолчанию 45°; шаг — расстояние между штрихами в единицах чертежа (на бланке 1 = 1 мм; без него — обычный, 2 мм на бланке); 2 в конце — ещё и поперёк, «в клетку». Сечения, грани, области неравенств и площади штрихуй только так, а не отрезками.',
+    example: 'f(x) = x^2\ng(x) = x + 2\nHatch(f, g, -1, 2)',
+    run(a, c) {
+      if (a.length < 1 || a.length > 7) throw new Error('нужно от 1 до 7 аргументов');
+      const first = c.shape(a[0]);
+      if (first.type === 'graph') {
+        const second = a[1] ? c.val(a[1]) : null;
+        const between = second?.k === 'shape' && second.s.type === 'graph';
+        const at = between ? 2 : 1;
+        if (a.length < at + 2) throw new Error(between ? 'нужно Hatch(f, g, a, b): между графиками от x = a до x = b' : 'нужно Hatch(f, a, b): от x = a до x = b');
+        const x0 = Math.min(c.num(a[at]), c.num(a[at + 1]));
+        const x1 = Math.max(c.num(a[at]), c.num(a[at + 1]));
+        const top = graphRun(first.f, x0, x1);
+        const bottom = between ? graphRun(c.fn(a[1]), x0, x1) : top.map((p) => ({ x: p.x, y: 0 }));
+        return shape({ type: 'region', pts: [...top, ...bottom.reverse()], hatch: hatchingOf(c, a.slice(at + 2)) });
+      }
+      if (a.length > 4) throw new Error('у фигуры — Hatch(фигура, угол, шаг, 2), не больше');
+      const hatch = hatchingOf(c, a.slice(1));
+      const flatOf = (s: Shape): Vec[] | null =>
+        s.type === 'polygon' || s.type === 'region'
+          ? s.pts
+          : s.type === 'circle'
+            ? Array.from({ length: 64 }, (_, i) => g.add(s.c, g.mul(g.dir((i / 64) * Math.PI * 2), s.r)))
+            : null;
+      if (first.type === 'space' ? first.of !== 'polygon' : !flatOf(first)) throw new Error('штрихуются многоугольник, окружность или область между графиками');
+      if (a[0].t === 'name') {
+        c.item(a[0]).hatch = hatch;
+        return NONE;
+      }
+      // A figure written right here: only its hatching is drawn.
+      if (first.type === 'space') throw new Error('многоугольник в пространстве задай с именем: t = Polygon(…), потом Hatch(t)');
+      return shape({ type: 'region', pts: flatOf(first)!, hatch });
     },
   },
   {
@@ -560,6 +658,152 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    names: ['ПоПроекциям', 'FromProjections'],
+    group: 'space',
+    forms: ['@(A_1, A_2)'],
+    doc: 'Точка в пространстве по её горизонтальной (A₁) и фронтальной (A₂) проекциям — точкам листа на эпюре: x — вдоль оси x₁₂ (влево от O), y — насколько A₁ ниже оси, z — насколько A₂ выше. Удобно, когда проекции даны на бланке.',
+    example: 'A_1 = (-3, -2)\nA_2 = (-3, 4)\nA = FromProjections(A_1, A_2)\nHide(A_1)\nHide(A_2)\nB = (6, 1, 2)\nSegment(A, B)',
+    run(a, c) {
+      args(a, 2);
+      const h = c.point(a[0]);
+      const f = c.point(a[1]);
+      const sx = c.scene.view.xRight ? 1 : -1;
+      return space('point', [{ x: (sx * (h.x + f.x)) / 2, y: -h.y, z: f.y }]);
+    },
+  },
+  {
+    names: ['Проекция', 'Projection'],
+    group: 'space',
+    forms: ['@(A, 1)', '@(A, 2)', '@(A, 3)'],
+    doc: 'Проекция точки пространства на П₁, П₂ или П₃ как точка листа — для построений на эпюре (прямоугольный треугольник, вращение): от неё можно вести перпендикуляры, окружности и т. п.',
+    example: 'A = (4, 2, 3)\nB = (1, 4, 1)\nSegment(A, B)\nK = Projection(B, 1)\nPerpendicularLine(K, Segment(Projection(A, 1), K))',
+    run(a, c) {
+      args(a, 2);
+      const p = c.pointAny(a[0]);
+      if (!('z' in p)) throw new Error('проекция берётся у точки в пространстве (x, y, z)');
+      const plane = Math.round(c.num(a[1]));
+      if (plane < 1 || plane > 3) throw new Error('плоскость проекций — 1, 2 или 3');
+      return point(projection(p, plane, !!c.scene.view.xRight));
+    },
+  },
+  // ------------------------------------------------ descriptive geometry, exactly
+  {
+    names: ['НатуральнаяВеличина', 'TrueLength'],
+    group: 'space',
+    forms: ['@(A, B)', '@(A, B, 2)', '@(A, B, 1, "B_0")'],
+    doc: 'Натуральная величина отрезка AB (точки в пространстве) способом прямоугольного треугольника: на П₁ (1, по умолчанию) или на П₂ (2) строится катет — разность z (на П₁) или y (на П₂) — в сторону от оси, гипотенуза A₁B₀ (A₂B₀) — натуральная величина, угол при A — наклон к плоскости (α к П₁, β к П₂). Всё строится точно. Возвращает гипотенузу: Length(h) — её длина.',
+    example: 'A = (30, 10, 20)\nB = (10, 30, 45)\nSegment(A, B)\nh = TrueLength(A, B)',
+    run(a, c) {
+      args(a, 2, 3, 4);
+      const pa = c.pointAny(a[0]);
+      const pb = c.pointAny(a[1]);
+      if (!is3(pa) || !is3(pb)) throw new Error('натуральная величина — у отрезка в пространстве: точки (x, y, z)');
+      const n = a[2] ? Math.round(c.num(a[2])) : 1;
+      if (n !== 1 && n !== 2) throw new Error('плоскость — 1 (П₁) или 2 (П₂)');
+      const t = rightTriangle(pa, pb, n, !!c.scene.view.xRight);
+      const base = a[1].t === 'name' ? a[1].name.replace(/_.*$/, '') : 'B';
+      const name0 = a[3] ? c.str(a[3]) : `${base}_0`;
+      c.draw({ type: 'segment', a: t.bn, b: t.b0 }, { thin: true });
+      c.draw({ type: 'point', p: t.b0 }, { label: name0 });
+      const from = Math.atan2(t.bn.y - t.an.y, t.bn.x - t.an.x);
+      let sweep = Math.atan2(t.b0.y - t.an.y, t.b0.x - t.an.x) - from;
+      if (sweep > Math.PI) sweep -= 2 * Math.PI;
+      if (sweep < -Math.PI) sweep += 2 * Math.PI;
+      c.draw({ type: 'angle', v: t.an, from, sweep }, { label: n === 1 ? 'α' : 'β' });
+      return shape({ type: 'segment', a: t.an, b: t.b0 });
+    },
+  },
+  {
+    names: ['УголНаклона', 'Inclination'],
+    group: 'space',
+    forms: ['@(A, B, 1)', '@(A, B, 2)'],
+    doc: 'Число: угол наклона отрезка AB (точки в пространстве) к П₁ (1) или П₂ (2), в градусах, точно. Для надписи: {Inclination(A, B, 1):0}°.',
+    example: 'A = (30, 10, 20)\nB = (10, 30, 45)\nSegment(A, B)\nText(Inclination(A, B, 1), (0, -20))',
+    run(a, c) {
+      args(a, 3);
+      const pa = c.pointAny(a[0]);
+      const pb = c.pointAny(a[1]);
+      if (!is3(pa) || !is3(pb)) throw new Error('угол наклона — у отрезка в пространстве: точки (x, y, z)');
+      const n = Math.round(c.num(a[2]));
+      if (n !== 1 && n !== 2) throw new Error('плоскость — 1 (П₁) или 2 (П₂)');
+      return num(inclination(pa, pb, n));
+    },
+  },
+  {
+    names: ['Следы', 'Traces'],
+    group: 'space',
+    forms: ['@(A, B)'],
+    doc: 'Следы прямой AB (точки в пространстве), точно: горизонтальный H (где прямая пересекает П₁) и фронтальный F (П₂) — их проекции H₁, H₂, F₁, F₂, линии связи и продолжение проекций прямой до следов. Через какие четверти проходит прямая — {Quarters(A, B)}.',
+    example: 'A = (40, 10, 15)\nB = (10, 25, 5)\nSegment(A, B)\nTraces(A, B)',
+    run(a, c) {
+      args(a, 2);
+      const pa = c.pointAny(a[0]);
+      const pb = c.pointAny(a[1]);
+      if (!is3(pa) || !is3(pb)) throw new Error('следы — у прямой в пространстве: точки (x, y, z)');
+      const xr = !!c.scene.view.xRight;
+      const { h, f } = traces(pa, pb);
+      if (!h && !f) throw new Error('прямая параллельна обеим плоскостям: следов нет');
+      for (const [t, letter] of [[h, 'H'], [f, 'F']] as const) {
+        if (!t) continue;
+        const p1 = projection(t, 1, xr);
+        const p2 = projection(t, 2, xr);
+        c.draw({ type: 'segment', a: p1, b: p2 }, { thin: true });
+        c.draw({ type: 'point', p: p1 }, { label: `${letter}_1` });
+        c.draw({ type: 'point', p: p2 }, { label: `${letter}_2` });
+        // The projections of the line carried on to the trace.
+        for (const n of [1, 2] as const) {
+          const end = projection(t, n, xr);
+          const pa2 = projection(pa, n, xr);
+          const pb2 = projection(pb, n, xr);
+          const near = Math.hypot(pa2.x - end.x, pa2.y - end.y) < Math.hypot(pb2.x - end.x, pb2.y - end.y) ? pa2 : pb2;
+          c.draw({ type: 'segment', a: near, b: end }, { thin: true });
+        }
+      }
+      return NONE;
+    },
+  },
+  {
+    names: ['Четверти', 'Quarters'],
+    group: 'space',
+    forms: ['@(A, B)'],
+    doc: 'Текст: через какие четверти пространства проходит прямая AB — «I, II, III». Для надписи: Пряма проходить через {Quarters(A, B)} чверті.',
+    example: 'A = (40, 10, 15)\nB = (10, 25, -5)\nSegment(A, B)\nText(Quarters(A, B), (0, 30))',
+    run(a, c) {
+      args(a, 2);
+      const pa = c.pointAny(a[0]);
+      const pb = c.pointAny(a[1]);
+      if (!is3(pa) || !is3(pb)) throw new Error('четверти — у прямой в пространстве: точки (x, y, z)');
+      return { k: 'str', v: quarters(pa, pb).join(', ') };
+    },
+  },
+  {
+    names: ['Развёртка', 'Развертка', 'Unfold'],
+    group: 'space',
+    forms: ['@(S, A, B, C, P)', '@(S, A, B, C, P, угол)'],
+    doc: 'Развёртка пирамиды SABC (точки в пространстве), точно: вершина S′ — в точке листа P, ребро S′A′ — под углом (в градусах, по умолчанию −60°), грани одна за другой, каждое ребро — своей натуральной величины, основание ABC приложено к A′B′ снаружи. Подписи S, A′, B′, C′, A″, C₀.',
+    example: 'S = (20, 25, 50)\nA = (50, 5, 0)\nB = (0, 5, 0)\nC = (25, 40, 0)\nUnfold(S, A, B, C, (90, 40))',
+    run(a, c) {
+      args(a, 5, 6);
+      const pts = a.slice(0, 4).map((e) => c.pointAny(e));
+      if (!pts.every(is3)) throw new Error('развёртка — у пирамиды в пространстве: точки (x, y, z)');
+      const [sp, ...base] = pts as Vec3[];
+      const at = c.point(a[4]);
+      const angle = a[5] ? c.num(a[5]) : -60;
+      const u = unfold(sp, base, at, angle);
+      const names = ["A'", "B'", "C'", "A''"];
+      u.ring.forEach((p, i) => {
+        c.draw({ type: 'segment', a: u.s, b: p });
+        if (i > 0) c.draw({ type: 'segment', a: u.ring[i - 1], b: p });
+        c.draw({ type: 'point', p }, { label: names[i] });
+      });
+      c.draw({ type: 'segment', a: u.ring[0], b: u.base });
+      c.draw({ type: 'segment', a: u.ring[1], b: u.base });
+      c.draw({ type: 'point', p: u.base }, { label: 'C_0' });
+      c.draw({ type: 'point', p: u.s }, { label: 'S' });
+      return NONE;
+    },
+  },
+  {
     names: ['ОсьX', 'XAxis'],
     group: 'space',
     forms: ['@("влево")', '@("вправо")'],
@@ -666,6 +910,21 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    names: ['СтильТочки', 'SetPointStyle'],
+    group: 'style',
+    forms: ['@(точка, n)'],
+    doc: 'Вид точки: 0 — закрашенная, 1 — крестик ×, 2 — незакрашенный кружок (выколотая точка: разрыв графика, конец промежутка, который в него не входит), 3 — плюс +. Линии через незакрашенный кружок не проходят.',
+    example: 'f(x) = x + 1\nA = (1, 2)\nSetPointStyle(A, 2)',
+    run(a, c) {
+      args(a, 2);
+      const n = Math.round(c.num(a[1]));
+      if (n < 0) throw new Error('стиль точки — 0, 1, 2 или 3');
+      // GeoGebra's other styles to the nearest: 5 ◇ open, 4 ◆ and the triangles filled.
+      c.item(a[0]).pointStyle = n <= 3 ? n : n === 5 ? 2 : 0;
+      return NONE;
+    },
+  },
+  {
     names: ['Толщина', 'SetLineThickness'],
     group: 'style',
     forms: ['@(объект, n)'],
@@ -751,6 +1010,23 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    names: ['НаБланке', 'OnBlank'],
+    group: 'view',
+    forms: ['@(x, y)', '@(x, y, мм)'],
+    doc: 'Чертёж на бланке: начало координат — в точке листа (x, y), в миллиметрах от левого верхнего угла (y вниз); одна единица — 1 мм (или столько мм, сколько задано третьим числом). Окно не подбирается, оси и ось x₁₂ не рисуются: они уже напечатаны. Точки бланка удобно брать пипеткой «⌖».',
+    example: 'OnBlank(120, 95)\nA = (0, 0)\nB = (30, 20)\nSegment(A, B)',
+    view: true,
+    run(a, c) {
+      args(a, 2, 3);
+      const x = c.num(a[0]);
+      const y = c.num(a[1]);
+      const unit = a[2] ? c.num(a[2]) : 1;
+      if (![x, y].every(Number.isFinite) || !(unit > 0)) throw new Error('нужны два числа (мм от левого верхнего угла листа) и, если надо, мм на единицу > 0');
+      c.scene.view.blank = { x, y, unit };
+      return NONE;
+    },
+  },
+  {
     names: ['Пропорции', 'SetAxesRatio'],
     group: 'view',
     forms: ['@(1, 1)', '@(a, b)'],
@@ -785,7 +1061,6 @@ export const FORMULA_HELP: { code: string; doc: string }[] = [
 
 /** GeoGebra commands that only matter on a screen: skipped without complaint. */
 export const IGNORED = [
-  'SetPointStyle',
   'SetPointSize',
   'SetDecoration',
   'SetLabelMode',

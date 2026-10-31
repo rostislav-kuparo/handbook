@@ -612,3 +612,135 @@ fn real_overlay() {
         image::imageops::resize(&crop, 640, 640, image::imageops::FilterType::Nearest).save(format!("{dir}/corner{k}.jpg")).unwrap();
     }
 }
+
+/// The camera turned up or down (`pitch`), sideways (`yaw`) and round (`roll`), degrees: R = Rz·Ry·Rx, row-major.
+fn turned(pitch: f64, yaw: f64, roll: f64) -> [f64; 9] {
+    let (p, y, r) = (pitch.to_radians(), yaw.to_radians(), roll.to_radians());
+    let (cp, sp, cy, sy, cr, sr) = (p.cos(), p.sin(), y.cos(), y.sin(), r.cos(), r.sin());
+    let rx = [1.0, 0.0, 0.0, 0.0, cp, -sp, 0.0, sp, cp];
+    let ry = [cy, 0.0, sy, 0.0, 1.0, 0.0, -sy, 0.0, cy];
+    let rz = [cr, -sr, 0.0, sr, cr, 0.0, 0.0, 0.0, 1.0];
+    let mul = |a: [f64; 9], b: [f64; 9]| -> [f64; 9] { std::array::from_fn(|k| (0..3).map(|j| a[k / 3 * 3 + j] * b[j * 3 + k % 3]).sum()) };
+    mul(rz, mul(ry, rx))
+}
+
+/// A4 seen by a camera of `focal` px turned by `rot`, its middle `dist` mm in front of the lens: (X, Y) mm on the sheet → photo px.
+fn camera(w: usize, h: usize, focal: f64, rot: [f64; 9], dist: f64) -> impl Fn(f64, f64) -> Pt {
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    move |x: f64, y: f64| {
+        let (x, y) = (x - 105.0, y - 148.5);
+        let p: [f64; 3] = std::array::from_fn(|i| rot[i * 3] * x + rot[i * 3 + 1] * y + if i == 2 { dist } else { 0.0 });
+        [cx + focal * p[0] / p[2], cy + focal * p[1] / p[2]]
+    }
+}
+
+/// The largest angle between the axes of two turns, degrees.
+fn axes_apart(a: &[f64; 9], b: &[f64; 9]) -> f64 {
+    (0..3)
+        .map(|c| {
+            let d: f64 = (0..3).map(|i| a[i * 3 + c] * b[i * 3 + c]).sum();
+            d.clamp(-1.0, 1.0).acos().to_degrees()
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn finds_the_tilt_of_a_squared_sheet_filling_the_frame() {
+    let (w, h) = (900, 1200);
+    let focal = 0.6 * (w as f64).hypot(h as f64);
+    for (pitch, yaw, roll) in [(-8.0, 4.0, 1.5), (12.0, -6.0, -1.0), (-3.0, 0.0, 0.5)] {
+        let rot = turned(pitch, yaw, roll);
+        let p = crate::perspective::find(&squares_closeup(w, h, focal, rot).render(), focal).expect("tilt");
+        assert_eq!(p.by, "two");
+        assert!(p.confidence > 0.8, "{}", p.confidence);
+        let off = axes_apart(&p.rot, &rot);
+        assert!(off < 0.2, "{pitch} {yaw} {roll}: off by {off}° ({:?})", p.rot);
+    }
+}
+
+#[test]
+fn finds_the_tilt_by_the_edges_of_a_clean_sheet() {
+    let (w, h) = (900, 1200);
+    let focal = 0.6 * (w as f64).hypot(h as f64);
+    let rot = turned(-10.0, 5.0, 3.0);
+    let on = camera(w, h, focal, rot, 420.0);
+    let mut s = Scene::new(w, h, [on(0.0, 0.0), on(210.0, 0.0), on(210.0, 297.0), on(0.0, 297.0)]);
+    s.ss = 2;
+    s.noise = (0.0002, 0.00001);
+    let p = crate::perspective::find(&s.render(), focal).expect("tilt");
+    let off = axes_apart(&p.rot, &rot);
+    assert!(off < 0.6, "off by {off}° ({p:?})");
+}
+
+#[test]
+fn a_clean_sheet_filling_the_frame_tells_no_tilt() {
+    let (w, h) = (900, 1200);
+    let mut s = Scene::new(w, h, [[-50.0, -50.0], [950.0, -50.0], [950.0, 1250.0], [-50.0, 1250.0]]);
+    s.ss = 1;
+    s.noise = (0.0004, 0.00002);
+    let p = crate::perspective::find(&s.render(), 900.0);
+    assert!(p.as_ref().is_none_or(|p| p.confidence < 0.5), "{p:?}");
+}
+
+#[test]
+fn the_tilt_of_a_real_photo_agrees_with_its_edges() {
+    let Some(p) = real("photo.jpg") else { return };
+    let focal = 26.0 / 43.27 * (p.w as f64).hypot(p.h as f64);
+    let t = crate::perspective::find(&p, focal).expect("tilt");
+    assert_eq!(t.by, "two", "{:?}", t.rot);
+    // The sheet's sides must point at the vanishing points of its axes.
+    let f = crate::find(&p).expect("sheet");
+    let (cx, cy) = (p.w as f64 / 2.0, p.h as f64 / 2.0);
+    let vp = |c: usize| [focal * t.rot[c] + cx * t.rot[6 + c], focal * t.rot[3 + c] + cy * t.rot[6 + c], t.rot[6 + c]];
+    let c = f.corners;
+    for (a, b, axis) in [(c[0], c[1], 0), (c[3], c[2], 0), (c[0], c[3], 1), (c[1], c[2], 1)] {
+        let v = vp(axis);
+        let m = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        // Directions from the side's middle: along the side, and to the vanishing point.
+        let to = [v[0] - m[0] * v[2], v[1] - m[1] * v[2]];
+        let along = sub(b, a);
+        let ang = (cross(along, to) / (along[0].hypot(along[1]) * to[0].hypot(to[1]))).abs().asin().to_degrees();
+        assert!(ang < 1.5, "side {axis}: {ang}° off");
+    }
+}
+
+/// A squared A4 seen closer than the frame: it runs out of the photo on every side.
+fn squares_closeup(w: usize, h: usize, focal: f64, rot: [f64; 9]) -> Scene {
+    let on = camera(w, h, focal, rot, 190.0);
+    let mut s = Scene::new(w, h, [on(0.0, 0.0), on(210.0, 0.0), on(210.0, 297.0), on(0.0, 297.0)]);
+    s.ss = 2;
+    s.falloff = 0.15;
+    s.noise = (0.0002, 0.00001);
+    for k in 0..=59 {
+        let y = 2.0 + 5.0 * k as f64;
+        s.strokes.push((on(0.0, y), on(210.0, y), 1.3, [0.62, 0.74, 0.95]));
+    }
+    for k in 0..=41 {
+        let x = 2.0 + 5.0 * k as f64;
+        s.strokes.push((on(x, 0.0), on(x, 297.0), 1.3, [0.62, 0.74, 0.95]));
+    }
+    s
+}
+
+#[test]
+fn a_closeup_of_squares_takes_no_row_for_an_edge() {
+    let (w, h) = (900, 1200);
+    let focal = 0.6 * (w as f64).hypot(h as f64);
+    let frame = [[0.0, 0.0], [900.0, 0.0], [900.0, 1200.0], [0.0, 1200.0]];
+    for (pitch, yaw, roll) in [(-8.0, 4.0, 1.5), (12.0, -6.0, -1.0), (-3.0, 0.0, 0.5)] {
+        let f = crate::find(&squares_closeup(w, h, focal, turned(pitch, yaw, roll)).render()).expect("sheet");
+        assert!(worst(&f.corners, &frame) < 1e-9, "{pitch} {yaw} {roll}: {f:?}");
+    }
+    // The same on a real notebook: parts of the page inside its edges.
+    let Some(p) = real("photo.jpg") else { return };
+    for (x0, y0, x1, y1) in [(300usize, 400usize, 1200usize, 1600usize), (250, 330, 1250, 1500)] {
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let mut rgba = Vec::with_capacity(cw * ch * 4);
+        for y in y0..y1 {
+            rgba.extend_from_slice(&p.rgba[(y * p.w + x0) * 4..(y * p.w + x1) * 4]);
+        }
+        let f = crate::find(&Photo::new(rgba, cw, ch)).expect("sheet");
+        let frame = [[0.0, 0.0], [cw as f64, 0.0], [cw as f64, ch as f64], [0.0, ch as f64]];
+        assert!(worst(&f.corners, &frame) < 1e-9, "crop {x0},{y0}: {f:?}");
+    }
+}

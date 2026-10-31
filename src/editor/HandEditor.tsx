@@ -4,9 +4,11 @@ import Text from '@tiptap/extension-text';
 import { Dropcursor, Gapcursor, Placeholder, UndoRedo } from '@tiptap/extensions';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import { useEffect, useRef, useState } from 'react';
+import { BlankAnswers, type AnswerHooks } from '../blank/answerPaste';
 import { HtmlBlock } from '../blocks/HtmlBlock';
 import { getHandwriting, hasGlyph, useHandwriting } from '../engine/handwriting';
 import type { DocContent, HandDocument } from '../model/types';
+import type { NodeLayout } from './docLayout';
 import { HandLayout } from './handLayout';
 import { InkColor, Script, TextSize } from './marks';
 import { MathText } from './mathText';
@@ -28,6 +30,10 @@ interface Props {
   onEditor: (editor: Editor | null) => void;
   /** Number of A4 sheets the text needs. */
   onPages: (pages: number) => void;
+  /** Where the lines and blocks are (for the rendered view), with the text they belong to. */
+  onLayout: (layout: (NodeLayout | null)[], content: DocContent) => void;
+  /** A neural net's answer pasted in a document on a blank. */
+  answers?: AnswerHooks;
 }
 
 /**
@@ -36,9 +42,13 @@ interface Props {
  * pasting from Word: ProseMirror drops anything the schema does not know.
  * What a hand can do stays: bigger letters, another pen, indices in formulas.
  */
-export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages }: Props) {
+export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages, onLayout, answers }: Props) {
+  const answersRef = useRef(answers);
+  answersRef.current = answers;
   const onPagesRef = useRef(onPages);
   onPagesRef.current = onPages;
+  const onLayoutRef = useRef(onLayout);
+  onLayoutRef.current = onLayout;
   const geoRef = useRef(geo);
   geoRef.current = geo;
   const [missing, setMissing] = useState<{ char: string; rect: DOMRect } | null>(null);
@@ -64,7 +74,18 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages }: 
         Script,
         MathText,
         SketchFences,
-        Pagination.configure({ onPages: (n) => onPagesRef.current(n), getGeometry: () => geoRef.current }),
+        BlankAnswers.configure({
+          hooks: {
+            context: () => answersRef.current?.context() ?? null,
+            onBusy: (busy) => answersRef.current?.onBusy(busy),
+            onReport: (report) => answersRef.current?.onReport(report),
+          },
+        }),
+        Pagination.configure({
+          onPages: (n) => onPagesRef.current(n),
+          getGeometry: () => geoRef.current,
+          onLayout: (layout, d) => onLayoutRef.current(layout, d.toJSON() as DocContent),
+        }),
         HandLayout.configure({
           getParams: () => {
             const s = getHandwriting().style;

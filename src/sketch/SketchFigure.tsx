@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 import { DEFAULT_DRAW_PEN, drawPenOf, type DrawPen } from '../editor/page';
 import type { Deal } from '../engine/client';
 import { useHandwriting } from '../engine/handwriting';
-import { drawingSvg, drawSketch, linesOnly, penFor, sketchLayout, type Drawing } from './render';
+import { aroundOnSheet, drawingSvg, drawSketch, linesOnly, penFor, sketchLayout, type Drawing, type SheetMap } from './render';
 
 /** The document's drawing pen (a drawing's own choice goes over it). */
 export const DrawPenContext = createContext<DrawPen>(DEFAULT_DRAW_PEN);
@@ -23,6 +23,8 @@ interface Props {
    * wait. Omitted: the drawing starts afresh (the editor).
    */
   deal?: Deal | null;
+  /** On a blank: what lies on the sheet (labels keep off it), and its version. */
+  sheetMap?: SheetMap | null;
 }
 
 /**
@@ -30,7 +32,7 @@ interface Props {
  * as the engine has written them. The height is known up front, so nothing
  * around it jumps.
  */
-export function SketchFigure({ code, pen, fontSize, width, placeholder, deal }: Props) {
+export function SketchFigure({ code, pen, fontSize, width, placeholder, deal, sheetMap }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [measured, setMeasured] = useState<{ w: number; fs: number } | null>(null);
   const { style, fontVersion } = useHandwriting();
@@ -57,7 +59,7 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder, deal }: 
     () => (w > 40 ? sketchLayout(code, w, fs, penFor(style, fs, draw)) : null),
     // The pen's parts, not the object (it is rebuilt on every render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [code, w, fs, style, draw.tool, draw.weight, draw.wobble, draw.pressure, draw.overshoot],
+    [code, w, fs, style, draw.tool, draw.weight, draw.wobble, draw.pressure, draw.overshoot, draw.points, draw.joins, draw.compass],
   );
 
   const [drawing, setDrawing] = useState<Drawing | null>(null);
@@ -65,13 +67,13 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder, deal }: 
   useEffect(() => {
     if (!layout || dealKey === null) return;
     let alive = true;
-    void drawSketch(layout, JSON.parse(dealKey) as Deal).then((d) => {
+    void drawSketch(layout, JSON.parse(dealKey) as Deal, aroundOnSheet(code, sheetMap)).then((d) => {
       if (alive) setDrawing(d);
     });
     return () => {
       alive = false;
     };
-  }, [layout, fontVersion, dealKey]);
+  }, [layout, fontVersion, dealKey, sheetMap?.version]);
 
   // The previous drawing stays until the new labels are written (no flicker while typing).
   const html = useMemo(() => {

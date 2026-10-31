@@ -348,7 +348,7 @@ export function layoutFormula(tex: string, width: number, fs: number, pen: Pen):
       boxes.push({ w, h: Math.max(1, p.rows.length) * rowH + fs * 0.4, part: { ...p, cells, colW } });
     }
   }
-  if (!boxes.length) return { width, height: Math.round(lineH), paths: [], labels: [], obstacles: [], empty: true };
+  if (!boxes.length) return { width, height: Math.round(lineH), paths: [], labels: [], obstacles: [], lines: [], pivots: [], empty: true };
 
   // Bands of parts side by side.
   const bands: Box[][] = [[]];
@@ -432,5 +432,5 @@ export function layoutFormula(tex: string, width: number, fs: number, pen: Pen):
     });
     top += h + fs * 0.3;
   });
-  return { width, height: Math.round(top), paths, labels, obstacles: [], empty: false };
+  return { width, height: Math.round(top), paths, labels, obstacles: [], lines: [], pivots: [], empty: false };
 }

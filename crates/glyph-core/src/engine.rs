@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::deal::Deal;
 use crate::derive::{self, Kind};
 use crate::font::{build_font, round_contours, FontGlyph, FontOptions, KeyGlyphs};
-use crate::geom::{strokes_bbox, BBox};
+use crate::geom::{stroke_length, strokes_bbox, BBox};
 use crate::kern::{joined_overlap, joined_overlap_at, pair_kern, Profile};
 use crate::model::*;
 use crate::outline;
@@ -119,6 +119,9 @@ pub struct CharStyles {
     /// Which variants of each letter the text before this paragraph used
     /// last (the previous paragraph's `deal`), so they do not repeat.
     pub deal: Deal,
+    /// Where lines start (character indices, as the editor broke them): the
+    /// lines break there and nowhere else. Empty: greedy breaking by `width`.
+    pub breaks: Vec<usize>,
 }
 
 /// Size, colour index and raise (font units, up) of one character.
@@ -257,7 +260,7 @@ impl EngineCore {
                     next.insert(target.to_string(), (sig, derived, Some(source.to_string())));
                 }
             }
-            for &mark in derive::PUNCTUATION {
+            for &mark in derive::PUNCTUATION.iter().chain(derive::MARKS) {
                 if !next.contains_key(mark) {
                     if let Some(p) = derive::punctuation(mark) {
                         next.insert(mark.to_string(), (hash_str(mark), p, Some("перо".to_string())));
@@ -287,11 +290,14 @@ impl EngineCore {
 
     /// A letter pair keeps only the variants written at the size of its own
     /// letters: a pair «на» with a capital-high «Н» would stand out in the
-    /// text. `None` for single letters (and pairs whose letters were never
-    /// written alone); otherwise the signature of those letters and the
-    /// variants kept (possibly none: then the letters are used one by one).
+    /// text, and one squeezed much narrower than its letters written apart
+    /// («то» with «о» pushed into «т») would look stuck together. `None` for
+    /// single letters (and pairs whose letters were never written alone);
+    /// otherwise the signature of those letters and the variants kept
+    /// (possibly none: then the letters are used one by one).
     fn pair_in_scale(&self, key: &str, prepared: &[Prepared]) -> Option<(u64, Vec<Prepared>)> {
         let top = |p: &Prepared| strokes_bbox(&p.strokes).y_max;
+        let width = |p: &Prepared| strokes_bbox(&p.strokes).width();
         let median = |v: &mut Vec<f64>| {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             v[v.len() / 2]
@@ -301,6 +307,7 @@ impl EngineCore {
         }
         let mut sig = 0u64;
         let mut expected = f64::NEG_INFINITY;
+        let mut apart = 0.0;
         for c in key.chars() {
             let (s, letters) = self.own.get(&c.to_string())?;
             let mut tops: Vec<f64> = letters.iter().map(top).collect();
@@ -308,9 +315,14 @@ impl EngineCore {
                 return None;
             }
             expected = expected.max(median(&mut tops));
+            apart += median(&mut letters.iter().map(width).collect());
             sig = mix(sig, *s);
         }
-        let kept = prepared.iter().filter(|p| (0.7 * expected..=1.2 * expected).contains(&top(p))).cloned().collect();
+        let kept = prepared
+            .iter()
+            .filter(|p| (0.7 * expected..=1.2 * expected).contains(&top(p)) && width(p) >= PAIR_WIDTH * apart)
+            .cloned()
+            .collect();
         Some((sig, kept))
     }
 
@@ -349,7 +361,8 @@ impl EngineCore {
             scale_skeleton(&mut skel, pl.origin_x, scale);
             pl.advance *= scale;
         }
-        let profile = Profile::of(&polys, -pl.origin_x);
+        let mut profile = Profile::of(&polys, -pl.origin_x);
+        profile.merge(&Profile::of_strokes(&marks_above(&ink.strokes), self.style.weight / 2.0, -pl.origin_x, scale));
         (polys, pl, profile, skel)
     }
 
@@ -511,6 +524,8 @@ impl EngineCore {
             seed: u64,
             hash: u64,
             space_after: f64,
+            /// Index of its first character in the paragraph.
+            start: usize,
         }
 
         let style = &self.style;
@@ -525,7 +540,7 @@ impl EngineCore {
             if chars[i].is_whitespace() {
                 // Leading spaces become a word without letters.
                 if words.is_empty() {
-                    words.push(Word { items: vec![], seed: doc_seed, hash: 0, space_after: 0.0 });
+                    words.push(Word { items: vec![], seed: doc_seed, hash: 0, space_after: 0.0, start: 0 });
                 }
                 let last = words.last_mut().unwrap();
                 let mut rng = Rng::new(mix(last.seed, 0x5ace));
@@ -546,25 +561,37 @@ impl EngineCore {
             };
             let word_styles: Vec<CharStyle> = (i..end).map(char_style).collect();
             let items = self.word_items(&chars[i..end], wseed, fallback_widths, &mut missing, &word_styles, &mut deal);
-            words.push(Word { items, seed: wseed, hash, space_after: 0.0 });
+            words.push(Word { items, seed: wseed, hash, space_after: 0.0, start: i });
             i = end;
         }
 
-        // Greedy line breaking on spaces; over-long words break anywhere.
+        // Greedy line breaking on spaces; over-long words break anywhere. With
+        // `breaks`, the lines break where the editor broke them (also inside a word).
+        let forced: std::collections::HashSet<usize> = styles.breaks.iter().copied().filter(|&b| b > 0).collect();
         let word_width = |w: &Word| w.items.iter().map(|it| it.advance).sum::<f64>();
         let mut lines: Vec<Vec<(usize, usize, f64)>> = vec![vec![]]; // (word, item, x)
         let mut line_words: Vec<Vec<usize>> = vec![vec![]];
         let mut x = 0.0;
         for (wi, w) in words.iter().enumerate() {
             let ww = word_width(w);
-            if x > 0.0 && x + ww > width {
+            let started = !lines.last().unwrap().is_empty();
+            let wrap = if forced.is_empty() { x > 0.0 && x + ww > width } else { started && forced.contains(&w.start) };
+            if wrap {
                 lines.push(vec![]);
                 line_words.push(vec![]);
                 x = 0.0;
             }
             line_words.last_mut().unwrap().push(wi);
+            let mut prev_char = usize::MAX;
             for (ii, item) in w.items.iter().enumerate() {
-                if x > 0.0 && x + item.advance > width && ww > width {
+                let at = w.start + item.pos.0;
+                let wrap = if forced.is_empty() {
+                    x > 0.0 && x + item.advance > width && ww > width
+                } else {
+                    ii > 0 && at != prev_char && forced.contains(&at)
+                };
+                prev_char = at;
+                if wrap {
                     lines.push(vec![]);
                     line_words.push(vec![wi]);
                     x = 0.0;
@@ -595,6 +622,12 @@ impl EngineCore {
             let baseline = top + li as f64 * line_height + offset;
             max_baseline = max_baseline.max(baseline + style.sag * 0.3 * line_height);
             let mut word_drop: HashMap<usize, (f64, f64)> = HashMap::new();
+            // Where each word of the line starts and ends: it slides down as it runs.
+            let mut extent: HashMap<usize, (f64, f64)> = HashMap::new();
+            for &(wi, ii, x) in line {
+                let e = extent.entry(wi).or_insert((f64::INFINITY, f64::NEG_INFINITY));
+                *e = (e.0.min(x), e.1.max(x + words[wi].items[ii].advance));
+            }
             for &(wi, ii, x) in line {
                 let (wdrop, wslide) = *word_drop.entry(wi).or_insert_with(|| {
                     let mut r = Rng::new(mix(words[wi].seed, 0xd409));
@@ -602,9 +635,13 @@ impl EngineCore {
                 });
                 let item = &words[wi].items[ii];
                 let gx = x + indent;
-                let (k, len) = item.pos;
-                let in_word = wslide * k as f64 / (len.max(2) - 1) as f64;
-                let y = baseline + droop * gx + wdrop + in_word - amp * (freq * gx + phase).sin() - item.shift;
+                let (start, end) = extent[&wi];
+                // Measured at every point, not once per letter: joined letters meet exactly.
+                let drift = |px: f64| {
+                    let slide = wslide * ((px - indent - start) / (end - start).max(1500.0)).clamp(0.0, 1.0);
+                    baseline + droop * px + wdrop + slide - amp * (freq * px + phase).sin() - item.shift
+                };
+                let y = drift(gx);
                 if let Some(ch) = &item.fallback {
                     fallback.push(FallbackChar { ch: ch.clone(), x: gx, y, line: li, scale: item.scale, color: item.color });
                 }
@@ -617,9 +654,9 @@ impl EngineCore {
                             parts.len() - 1
                         }
                     };
-                    outline::svg_path(&item.polys, gx - item.origin, y, true, &mut parts[at].d);
+                    outline::svg_path_along(&item.polys, gx - item.origin, drift, true, &mut parts[at].d);
                     if let Some(out) = line_skel.get_mut(li) {
-                        out.extend(item.skel.iter().map(|s| SkelStroke { color: item.color, pts: skeleton_points(s, gx - item.origin, y) }));
+                        out.extend(item.skel.iter().map(|s| SkelStroke { color: item.color, pts: skeleton_points(s, gx - item.origin, drift) }));
                     }
                 }
             }
@@ -708,18 +745,40 @@ impl EngineCore {
                 }
                 let e = end(&ink.strokes[si], at_start);
                 let body = strokes_bbox(&ink.strokes);
-                let over = e.x > body.x_min + (0.3 * body.width()).max(60.0);
+                // A start at the top of a stroke that runs down from it (the stem of «і», «ї»,
+                // «ч» written without a lead-in), well above where the pen leaves: it is
+                // climbed to from below, as a lead-in of its own would, not reached over a bowl.
+                let stem = e.y - py > 0.3 * X_HEIGHT && synth::runs_down(&ink.strokes[si], at_start, 200.0);
+                let over = !stem && e.x > body.x_min + (0.3 * body.width()).max(60.0);
                 let g0 = (sb * 0.4).max(12.0);
                 // The pen needs room to climb or drop to the start.
                 let mut origin = e.x - (g0 + 0.35 * (e.y - py).abs()) / scale;
                 if over {
                     origin = origin.min(body.x_min - radius - g0 / scale);
                 }
-                // The letters themselves must not run into each other.
+                if stem {
+                    // The climb and the stem part at the foot as two strokes of «и» do: a
+                    // slanted stem would otherwise come down onto the climb, one spike.
+                    let foot = ink.strokes[si].iter().filter(|q| q.y < py + 0.25 * X_HEIGHT).map(|q| q.x).fold(f64::INFINITY, f64::min);
+                    if foot.is_finite() {
+                        origin = origin.min(foot - radius - (g0 + 0.5 * (e.y - py)) / scale);
+                    }
+                }
+                // The letters themselves must not run into each other — nor the dots above
+                // this one into the previous letter: they are never part of the join.
                 if let Some((pp, padv)) = prev_profile {
                     let (_, right_rel) = Profile::envelope(&[(pp.clone(), *padv)]);
                     let left = Profile::of_strokes(&ink.strokes, radius, -origin, scale).left;
-                    let need = joined_overlap_at(&right_rel, &left, &[p.y, e.y * scale], style.weight + 40.0, (style.weight * 0.4).max(8.0));
+                    let mut need = joined_overlap_at(&right_rel, &left, &[p.y, e.y * scale], style.weight + 40.0, (style.weight * 0.4).max(8.0));
+                    // Only the part the pen arrives by may come close to the previous letter;
+                    // the rest of this one keeps the air of two strokes apart at every height
+                    // (the bowl of «о» never tucks in under the exit of «д»).
+                    let body: Vec<Stroke> =
+                        ink.strokes.iter().enumerate().map(|(k, s)| if k == si { synth::without_start(s, at_start, JOIN_PART) } else { s.clone() }).collect();
+                    let rest = Profile::of_strokes(&body, radius, -origin, scale).left;
+                    need = need.max(joined_overlap_at(&right_rel, &rest, &[], 0.0, 0.75 * g0));
+                    let dots = Profile::of_strokes(&marks_above(&ink.strokes), radius, -origin, scale).left;
+                    need = need.max(joined_overlap_at(&right_rel, &dots, &[], 0.0, g0));
                     origin -= need.min(400.0) / scale;
                 }
                 let s = &ink.strokes[si];
@@ -736,7 +795,7 @@ impl EngineCore {
                     let l = (dx * dx + dy * dy).sqrt().max(1e-9);
                     (dx / l, dy / l)
                 };
-                lead_in = Some((synth::connector(from, p.dir, e, in_dir, over), si, at_start));
+                lead_in = Some((synth::connector(from, p.dir, e, in_dir, over, stem), si, at_start));
                 synth::untaper(&mut ink.strokes[si], at_start);
                 joined = true;
                 origin
@@ -783,7 +842,8 @@ impl EngineCore {
             scale_skeleton(&mut skel, origin, scale);
         }
         let advance = ((right - origin) * scale).max(20.0);
-        let profile = Profile::of(&polys, -origin);
+        let mut profile = Profile::of(&polys, -origin);
+        profile.merge(&Profile::of_strokes(&marks_above(&ink.strokes), radius, -origin, scale));
         Placed { polys, skel, origin, advance, profile, joined, exit }
     }
 
@@ -825,7 +885,8 @@ impl EngineCore {
             let mut take = 1;
             if style.pairs && !isolated(i) && rng.f64() < 0.75 {
                 for len in [3, 2] {
-                    if i + len <= chars.len() {
+                    // A pair never takes a mark meant for its last letter (x̄).
+                    if i + len <= chars.len() && !chars[i + 1..(i + len + 1).min(chars.len())].iter().any(|&c| derive::is_mark(c)) {
                         let k: String = chars[i..i + len].iter().collect();
                         if self.keys.get(&k).is_some_and(|d| d.derived_from.is_none()) {
                             take = len;
@@ -834,14 +895,17 @@ impl EngineCore {
                     }
                 }
             }
-            let key: String = chars[i..i + take].iter().collect();
+            let mut key: String = chars[i..i + take].iter().collect();
             let letter = key.chars().all(char::is_alphabetic);
-            let ink = self.keys.get(&key).map(|data| {
+            // Marks over the letter (x̄, a⃗) belong to it: they are not letters of the word.
+            let marks = chars[i + take..].iter().take_while(|&&c| derive::is_mark(c)).count();
+            let is_letter = |k: usize| chars[k].is_alphabetic() || derive::is_mark(chars[k]);
+            let mut ink = self.keys.get(&key).map(|data| {
                 // Abbreviation letters stand alone, and so do one-letter words (and a letter
                 // before digits: M₄₁). Otherwise the place in the word picks the variants
                 // (see `Position`); the font joins only those written to join on the left.
-                let after_letter = i > 0 && chars[i - 1].is_alphabetic();
-                let before_letter = chars.get(i + take).is_some_and(|c| c.is_alphabetic());
+                let after_letter = i > 0 && is_letter(i - 1);
+                let before_letter = chars.get(i + take + marks).is_some_and(|c| c.is_alphabetic());
                 let position = if isolated(i) {
                     Position::Isolated
                 } else if letter && !before_letter {
@@ -861,6 +925,19 @@ impl EngineCore {
                 synth::synthesize(&data.prepared, &data.model, Choice::Variant(pick), position, &mut rng, style, &self.joins, !bridged)
             });
             let lowercase = letter && !key.chars().any(char::is_uppercase);
+            if marks > 0 {
+                // Drawn with the pen above the letter; without its ink (or a mark's) the whole cluster falls back.
+                for &c in &chars[i + take..i + take + marks] {
+                    ink = ink.and_then(|mut ink| {
+                        let data = self.keys.get(c.to_string().as_str())?;
+                        let mark = synth::synthesize(&data.prepared, &data.model, Choice::Random, Position::Any, &mut rng, style, &self.joins, true);
+                        derive::put_mark(&mut ink.strokes, mark.strokes);
+                        Some(ink)
+                    });
+                    key.push(c);
+                }
+                take += marks;
+            }
             word.push(Letter { key, ink, pos: (i, letters), style: char_styles.get(i).copied().unwrap_or_default(), lowercase });
             i += take;
         }
@@ -985,7 +1062,7 @@ struct Item {
     origin: f64,
     advance: f64,
     fallback: Option<String>,
-    /// Index of the letter inside its word and the word's length (for sag).
+    /// Index of the letter inside its word and the word's length.
     pos: (usize, usize),
     scale: f64,
     color: u8,
@@ -1002,11 +1079,11 @@ fn scale_skeleton(skel: &mut Skeleton, origin: f64, scale: f64) {
 
 /// A centre line moved like the outlines (`svg_path` with flip) and thinned to
 /// a point every ~30 font units (strokes are resampled every 5), rounded for JSON.
-fn skeleton_points(s: &[[f64; 4]], dx: f64, dy: f64) -> Vec<f64> {
+fn skeleton_points(s: &[[f64; 4]], dx: f64, dy: impl Fn(f64) -> f64) -> Vec<f64> {
     let mut out = Vec::new();
     let mut last: Option<[f64; 2]> = None;
     for (i, q) in s.iter().enumerate() {
-        let p = [q[0] + dx, -q[1] + dy];
+        let p = [q[0] + dx, -q[1] + dy(q[0] + dx)];
         let far = last.is_none_or(|l| (p[0] - l[0]).hypot(p[1] - l[1]) >= 30.0);
         if far || i + 1 == s.len() {
             out.extend([(p[0] * 10.0).round() / 10.0, (p[1] * 10.0).round() / 10.0, (q[2] * 10.0).round() / 10.0, (q[3] * 100.0).round() / 100.0]);
@@ -1014,6 +1091,30 @@ fn skeleton_points(s: &[[f64; 4]], dx: f64, dy: f64) -> Vec<f64> {
         }
     }
     out
+}
+
+/// A recorded pair at least this share of its letters' widths written apart
+/// is written as a hand joins them; a narrower one is squeezed.
+const PAIR_WIDTH: f64 = 0.85;
+
+/// How much of the stroke a joined letter starts with is the join itself
+/// (its lead-in, the top of a stem): only that may come close to the
+/// previous letter, font units.
+const JOIN_PART: f64 = 150.0;
+
+/// How much air a dot over a letter keeps above it, font units.
+const DOT_AIR: f64 = 140.0;
+
+/// Dots and small marks over a letter (і, ї, й, ё) with the air a hand leaves
+/// above them: an overhang of the neighbour (the bar of «Г», the exit of «т»)
+/// never comes down onto them. As strokes, for a profile.
+fn marks_above(strokes: &[Stroke]) -> Vec<Stroke> {
+    let longest = strokes.iter().map(|s| stroke_length(s)).fold(0.0, f64::max);
+    strokes
+        .iter()
+        .filter(|s| !s.is_empty() && stroke_length(s) < 0.35 * longest && s.iter().all(|q| q.y > 0.8 * X_HEIGHT))
+        .map(|s| (0..=(DOT_AIR / 20.0) as usize).flat_map(|k| s.iter().map(move |q| Pt { y: q.y + k as f64 * 20.0, ..*q })).collect())
+        .collect()
 }
 
 /// Letter `i` of a word is part of an abbreviation: capitals next to capitals
@@ -1125,29 +1226,62 @@ mod tests {
         assert!(ids[1] >= first + n && ids[2] >= first + n, "middle letters use joining variants: {ids:?}");
     }
 
+    /// A pair as wide as its two letters written apart.
+    fn pair_sample(id: &str, ch: &str, h: f64, width: f64) -> Sample {
+        let mut s = wave_sample(id, ch, h, true);
+        let k = width / 300.0;
+        s.strokes.iter_mut().flatten().for_each(|p| p.x *= k);
+        s.exit = s.exit.map(|a| Anchor { x: a.x * k, ..a });
+        s
+    }
+
     #[test]
     fn pairs_written_out_of_scale_are_left_out() {
         let mut e = EngineCore::new();
         let singles = vec![wave_sample("1", "с", 200.0, true), wave_sample("2", "т", 300.0, true)];
         let mut tall = singles.clone();
-        tall.extend([wave_sample("3", "ст", 700.0, true), wave_sample("4", "ст", 280.0, true)]);
+        tall.extend([pair_sample("3", "ст", 700.0, 600.0), pair_sample("4", "ст", 280.0, 600.0)]);
         e.set_samples(tall);
         assert_eq!(e.keys["ст"].prepared.len(), 1, "the capital-high variant is dropped");
         let mut only_tall = singles.clone();
-        only_tall.push(wave_sample("3", "ст", 700.0, true));
+        only_tall.push(pair_sample("3", "ст", 700.0, 600.0));
         e.set_samples(only_tall);
         assert!(!e.keys.contains_key("ст"), "with no variant in scale the letters go one by one");
+        let mut squeezed = singles.clone();
+        squeezed.extend([pair_sample("3", "ст", 280.0, 600.0), pair_sample("4", "ст", 280.0, 420.0)]);
+        e.set_samples(squeezed);
+        assert_eq!(e.keys["ст"].prepared.len(), 1, "the pair squeezed narrower than its letters is dropped");
     }
 
     #[test]
     fn recorded_pair_is_used_in_the_font() {
         let mut e = EngineCore::new();
-        e.set_samples(vec![wave_sample("1", "с", 200.0, true), wave_sample("2", "т", 300.0, true), wave_sample("3", "ст", 260.0, true)]);
+        e.set_samples(vec![wave_sample("1", "с", 200.0, true), wave_sample("2", "т", 300.0, true), pair_sample("3", "ст", 260.0, 600.0)]);
         let font = e.build_font().unwrap();
         assert_eq!(shape(&font, "ст").len(), 1, "с+т is replaced by the pair glyph");
         e.set_style(Style { pairs: false, ..Style::default() });
         let font = e.build_font().unwrap();
         assert_eq!(shape(&font, "ст").len(), 2);
+    }
+
+    #[test]
+    fn marks_are_drawn_over_their_letter() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "х", 300.0, true), wave_sample("2", "м", 300.0, true)]);
+        // x̄ (Latin x from Cyrillic х + macron) in ink: no fallback, no room of its own.
+        let plain = e.render_paragraph("xм", 5000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        let barred = e.render_paragraph("x\u{0304}м", 5000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        assert!(barred.fallback.is_empty() && barred.missing.is_empty());
+        assert!(barred.d.len() > plain.d.len(), "the bar adds ink");
+        // A letter without handwriting takes its mark into the fallback font.
+        let r = e.render_paragraph("ж\u{20D7}", 5000.0, 1500.0, 1, &HashMap::new(), &CharStyles::default());
+        assert_eq!(r.fallback.iter().map(|f| f.ch.as_str()).collect::<Vec<_>>(), ["ж\u{20D7}"]);
+
+        // In the font the mark is a glyph of its own, moved back over the letter.
+        let font = e.build_font().unwrap();
+        let glyphs = shape(&font, "x\u{0304}");
+        assert_eq!(glyphs.len(), 2);
+        assert!(glyphs.iter().all(|&g| g != 0), "no .notdef: the browser keeps the cluster in this font");
     }
 
     #[test]
@@ -1174,6 +1308,24 @@ mod tests {
     }
 
     #[test]
+    fn lines_break_where_the_editor_broke_them() {
+        let mut e = EngineCore::new();
+        e.set_style(Style { derive: false, ..Style::default() });
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true), wave_sample("2", "а", 200.0, true)]);
+        // A wide line, broken before the 2nd and the 4th word only.
+        let styles = CharStyles { breaks: vec![0, 3, 9], ..Default::default() };
+        let r = e.render_paragraph("мм мм мм мм", 90000.0, 1500.0, 1, &HashMap::new(), &styles);
+        assert_eq!(r.lines, 3);
+        // A narrow line keeps the given breaks too: no wrapping of its own.
+        let r = e.render_paragraph("мм мм мм мм", 500.0, 1500.0, 1, &HashMap::new(), &styles);
+        assert_eq!(r.lines, 3);
+        // Inside a word too long for the editor's line.
+        let styles = CharStyles { breaks: vec![4], ..Default::default() };
+        let r = e.render_paragraph("мамамама", 90000.0, 1500.0, 1, &HashMap::new(), &styles);
+        assert_eq!(r.lines, 2);
+    }
+
+    #[test]
     fn centre_lines_follow_the_ink() {
         let mut e = EngineCore::new();
         e.set_samples(vec![wave_sample("1", "м", 300.0, true), wave_sample("2", "а", 200.0, true)]);
@@ -1194,6 +1346,23 @@ mod tests {
         for p in pts {
             assert!(p[0] >= x0 - 1.0 && p[0] <= x1 + 1.0 && p[1] >= y0 - 1.0 && p[1] <= y1 + 1.0, "{p:?} outside {x0}..{x1} x {y0}..{y1}");
             assert!((0.3..=1.5).contains(&p[3]) && p[2] > 0.0);
+        }
+    }
+
+    #[test]
+    fn joined_letters_meet_exactly_on_a_drifting_line() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true), wave_sample("2", "м", 320.0, true)]);
+        e.set_style(Style { sag: 1.0, line_jitter: 1.0, ..Style::default() });
+        let styles = CharStyles { skeleton: true, ..Default::default() };
+        for seed in 1..6 {
+            let r = e.render_paragraph("мм", 9000.0, 1500.0, seed, &HashMap::new(), &styles);
+            let strokes = &r.line_skel[0];
+            assert_eq!(strokes.len(), 2);
+            let (a, b) = (&strokes[0].pts, &strokes[1].pts);
+            let (end, start) = ([a[a.len() - 4], a[a.len() - 3]], [b[0], b[1]]);
+            let gap = (end[0] - start[0]).hypot(end[1] - start[1]);
+            assert!(gap < 2.0, "seed {seed}: the join steps by {gap:.1} ({end:?} → {start:?})");
         }
     }
 
@@ -1251,6 +1420,79 @@ mod tests {
         e.set_style(Style { bridge: false, ..Style::default() });
         let apart = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
         assert!(left_of(&apart[1]) > 20.0, "without connecting strokes «т» stands apart: {}", left_of(&apart[1]));
+    }
+
+    /// «і» as a hand writes it alone: a slanted stem from the top, a hook, the dot last.
+    fn dotted_i(id: &str) -> Sample {
+        let mut stem: Vec<InkPoint> = (0..=30).map(|i| InkPoint { x: 120.0 - i as f64 * 4.0, y: 430.0 - i as f64 * 14.0, t: i as f64 * 6.0, p: 0.5 }).collect();
+        stem.extend((1..=10).map(|i| InkPoint { x: i as f64 * 9.0, y: 10.0 + i as f64 * 6.0, t: 200.0 + i as f64 * 6.0, p: 0.5 }));
+        let dot = (0..4).map(|i| InkPoint { x: 130.0 + i as f64 * 3.0, y: 560.0, t: 400.0 + i as f64 * 8.0, p: 0.5 }).collect();
+        Sample {
+            id: id.into(),
+            ch: "і".into(),
+            strokes: vec![stem, dot],
+            entry: Some(Anchor { x: 120.0, y: 430.0, connect: false }),
+            exit: Some(Anchor { x: 90.0, y: 70.0, connect: true }),
+            pointer_type: Some("mouse".into()),
+        }
+    }
+
+    #[test]
+    fn a_stem_from_the_top_is_climbed_to_with_room_at_its_foot() {
+        let mut e = EngineCore::new();
+        e.set_samples(vec![wave_sample("1", "м", 300.0, true), dotted_i("2")]);
+        let chars: Vec<char> = "мі".chars().collect();
+        let items = e.word_items(&chars, 7, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
+        let i = &items[1];
+        // The top of the stem (not the dot), from where the pen left «м».
+        let top = i.polys.iter().flatten().filter(|p| p[1] < 500.0).fold([0.0, f64::MIN], |a, p| if p[1] > a[1] { *p } else { a });
+        assert!(top[0] - i.origin > 300.0, "the climb runs over, not along the stem: {}", top[0] - i.origin);
+    }
+
+    #[test]
+    fn a_dot_keeps_clear_of_the_letter_before() {
+        // A long bar just above the height of the dot, as «Г» has: the dot of «і» must not end under it.
+        let bar = Sample {
+            id: "1".into(),
+            ch: "г".into(),
+            strokes: vec![(0..=60)
+                .map(|i| {
+                    let (x, y) = match i {
+                        0..=25 => (500.0 - i as f64 * 20.0, 670.0),
+                        26..=50 => (0.0, 670.0 - (i - 25) as f64 * 26.8),
+                        _ => ((i - 50) as f64 * 10.0, (i - 50) as f64 * 6.0),
+                    };
+                    InkPoint { x, y, t: i as f64 * 6.0, p: 0.5 }
+                })
+                .collect()],
+            entry: None,
+            exit: Some(Anchor { x: 100.0, y: 60.0, connect: true }),
+            pointer_type: Some("mouse".into()),
+        };
+        // …and one that leaves high under its own overhang, joined to «і».
+        let hood = Sample {
+            id: "3".into(),
+            ch: "ф".into(),
+            strokes: vec![[(0.0, 0.0), (0.0, 650.0), (600.0, 650.0), (450.0, 500.0)]
+                .windows(2)
+                .flat_map(|w| (0..20).map(move |k| (w[0].0 + (w[1].0 - w[0].0) * k as f64 / 20.0, w[0].1 + (w[1].1 - w[0].1) * k as f64 / 20.0)))
+                .chain([(450.0, 500.0)])
+                .enumerate()
+                .map(|(i, (x, y))| InkPoint { x, y, t: i as f64 * 6.0, p: 0.5 })
+                .collect()],
+            entry: None,
+            exit: Some(Anchor { x: 450.0, y: 500.0, connect: true }),
+            pointer_type: Some("mouse".into()),
+        };
+        let mut e = EngineCore::new();
+        e.set_samples(vec![bar, hood, dotted_i("2")]);
+        for word in ["гі", "фі"] {
+            let items = e.word_items(&word.chars().collect::<Vec<_>>(), 7, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
+            let over = items[0].polys.iter().flatten().filter(|p| p[1] > 620.0).map(|p| p[0]).fold(f64::MIN, f64::max) - items[0].origin;
+            let dot_polys = items[1].polys.iter().filter(|c| c.iter().all(|p| p[1] > 520.0));
+            let dot = items[0].advance + dot_polys.flatten().map(|p| p[0]).fold(f64::INFINITY, f64::min) - items[1].origin;
+            assert!(dot - over > 15.0, "{word}: the dot stands clear of what hangs over it: {}", dot - over);
+        }
     }
 
     #[test]

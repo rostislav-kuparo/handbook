@@ -1,18 +1,25 @@
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getHandwriting, useHandwriting } from '../engine/handwriting';
 import { CodeEditor } from './CodeEditor';
 import type { HtmlBlockAttrs } from './HtmlBlock';
 import { buildSrcdoc, HostToBlock, isBlockMessage } from './runtime';
 import { useVendor } from './useVendor';
 import { LINE_HEIGHT_EM } from '../editor/layout';
-import { drawPenOf, SHEET_W } from '../editor/page';
-import { PageContext } from '../editor/Paper';
-import { sketchErrors as errorsOf } from '../sketch/render';
+import { drawPenOf, MM } from '../editor/page';
+import { BlankPicker } from '../blank/BlankPicker';
+import { BlockBar, BlockHandles, BlockShield } from './BlockBar';
+import { dragBlock, sidesFor, type Side } from './drag';
+import { SideEditor, useSideEditor } from './SideEditor';
+import { BLANK_LETTERS } from '../blank/letterSize';
+import { noteFontSize } from '../blank/note';
+import { BlankContext, PageContext } from '../editor/Paper';
+import { zoomOf } from '../editor/zoom';
+import { blankBox, heightOf, sketchErrors as errorsOf } from '../sketch/render';
 import { DrawPenContext, SketchFigure } from '../sketch/SketchFigure';
 import { DrawPenPicker } from '../sketch/DrawPenPicker';
 import { SketchHelp } from '../sketch/SketchHelp';
-import { SketchPanel } from '../sketch/SketchPanel';
+import { SketchPanel, type PickKind } from '../sketch/SketchPanel';
 
 const MAX_DATA_BYTES = 500_000;
 
@@ -28,8 +35,19 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
 
   const [height, setHeight] = useState(attrs.height);
   const sketch = attrs.kind === 'sketch';
+  // The code (commands, data) opens in the window on the left; one block's at a time.
+  const [viewId] = useState(() => crypto.randomUUID());
+  const [sideOpen, setSideOpen] = useSideEditor(viewId);
+  const [panelKind, setPanelKind] = useState<'code' | 'data'>('code');
+  const panel = sideOpen ? panelKind : null;
+  const setPanel = (p: null | 'code' | 'data') => {
+    if (p) setPanelKind(p);
+    setSideOpen(p !== null);
+  };
   // A new, empty drawing opens with its commands, ready for a paste.
-  const [panel, setPanel] = useState<null | 'code' | 'data'>(() => (attrs.kind === 'sketch' && !attrs.code.trim() ? 'code' : null));
+  useEffect(() => {
+    if (attrs.kind === 'sketch' && !attrs.code.trim()) setSideOpen(true);
+  }, []);
   const [help, setHelp] = useState(false);
   const [appliedCode, setAppliedCode] = useState(attrs.code);
   const [draftCode, setDraftCode] = useState(attrs.code);
@@ -130,10 +148,27 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
 
   // ---- Floating over the text, and keeping inline blocks on the ruling.
   const geo = useContext(PageContext);
+  const onBlank = useContext(BlankContext);
+  const [picking, setPicking] = useState<PickKind | null>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const [pad, setPad] = useState(0);
   const [drag, setDrag] = useState<{ x: number; y: number; w: number } | null>(null);
-  const pos = drag ?? { x: attrs.x, y: attrs.y, w: attrs.w };
+  // A drawing on a blank (НаБланке) lies where its commands put it on the sheet; it floats and is not dragged.
+  const box = useMemo(() => (sketch ? blankBox(attrs.code) : null), [sketch, attrs.code]);
+  /** Where the editor's column starts below the sheet's writable area (the title above it), px. */
+  const [columnTop, setColumnTop] = useState(0);
+  useLayoutEffect(() => {
+    if (!box) return;
+    const root = innerRef.current?.closest('.ProseMirror');
+    const content = root?.closest('.sheet-content');
+    if (root && content) setColumnTop((root.getBoundingClientRect().top - content.getBoundingClientRect().top) / zoomOf(root));
+  }, [box]);
+  useEffect(() => {
+    if (box && !attrs.float) updateAttributes({ float: true });
+  }, [!!box, attrs.float]);
+  const pos = box
+    ? { x: box.x - geo.margin.left, y: box.y - geo.margin.top - columnTop, w: box.w }
+    : (drag ?? { x: attrs.x, y: attrs.y, w: attrs.w });
 
   // Inline blocks: round the height up to whole lines so the text below stays on the ruling.
   useEffect(() => {
@@ -145,7 +180,7 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
     const ro = new ResizeObserver(() => {
       const editorRoot = inner.closest('.ProseMirror') as HTMLElement | null;
       const lh = (parseFloat(getComputedStyle(editorRoot ?? inner).fontSize) || 16) * LINE_HEIGHT_EM;
-      const h = inner.getBoundingClientRect().height;
+      const h = inner.getBoundingClientRect().height / zoomOf(inner);
       setPad(Math.max(0, Math.ceil(h / lh - 0.001) * lh - h));
     });
     ro.observe(inner);
@@ -160,15 +195,17 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
     const el = innerRef.current?.parentElement;
     const editorRoot = el?.closest('.ProseMirror');
     if (!el || !editorRoot) return;
+    // Screen sizes are zoomed with the sheets: back to sheet pixels.
+    const z = zoomOf(el);
     const a = el.getBoundingClientRect();
     const b = editorRoot.getBoundingClientRect();
     const pos = getPos();
     if (typeof pos !== 'number') return;
-    // Empty lines take the room the block leaves, so the text below stays where it was
-    // (an open commands/data panel doesn't count: it isn't part of the figure).
+    // Empty lines take the room the block leaves, so the text below stays where it was.
     const lh = (parseFloat(getComputedStyle(editorRoot).fontSize) || 16) * LINE_HEIGHT_EM;
-    const panelH = el.querySelector('.html-block-panel')?.getBoundingClientRect().height ?? 0;
-    const lines = Math.max(1, Math.ceil((a.height - panelH) / lh - 0.05));
+    const lines = Math.max(1, Math.ceil(a.height / z / lh - 0.05));
+    // The figure stays put: a floating block's header goes above it, and it has no border.
+    const headH = (el.querySelector('.html-block-head')?.getBoundingClientRect().height ?? 0) / z;
     const paragraph = editor.schema.nodes.paragraph;
     // Stay exactly where it is now; only stop taking room in the text. One undo step.
     editor
@@ -177,9 +214,9 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
         tr.setNodeMarkup(pos, undefined, {
           ...node.attrs,
           float: true,
-          x: Math.round(a.left - b.left),
-          y: Math.round(a.top - b.top),
-          w: Math.round(Math.min(a.width, 460)),
+          x: Math.round((a.left - b.left) / z + 1),
+          y: Math.round((a.top - b.top) / z + 1 + headH),
+          w: Math.round(Math.min(a.width / z, 460)),
         });
         tr.insert(pos + node.nodeSize, Array.from({ length: lines }, () => paragraph.create()));
         return true;
@@ -187,39 +224,46 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
       .run();
   };
 
-  const startDrag = (e: React.PointerEvent, mode: 'move' | 'resize') => {
-    if (!attrs.float) return;
-    e.preventDefault(); // also keeps ProseMirror from starting a selection or a drag
-    e.stopPropagation();
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const start = { x: attrs.x, y: attrs.y, w: attrs.w };
-    let last = start;
-    setDrag(start); // turns off pointer events in the iframe while dragging
-    getSelection()?.removeAllRanges();
-    document.body.style.userSelect = 'none';
-    const move = (ev: PointerEvent) => {
-      const dx = ev.clientX - sx;
-      const dy = ev.clientY - sy;
-      last =
-        mode === 'move'
-          ? {
-              ...start,
-              x: Math.round(Math.min(Math.max(start.x + dx, -geo.margin.left + 4), geo.contentW + geo.margin.right - start.w - 4)),
-              y: Math.round(Math.max(start.y + dy, -geo.margin.top)),
-            }
-          : { ...start, w: Math.round(Math.min(Math.max(start.w + dx, 160), SHEET_W - 8)) };
-      setDrag(last);
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      document.body.style.userSelect = '';
-      setDrag(null);
-      updateAttributes(last);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+  /** Selects this block (a click on it while it is not selected does only that). */
+  const select = () => {
+    const p = getPos();
+    if (typeof p === 'number') editor.commands.setNodeSelection(p);
+  };
+
+  /** Stretching (not moving): the width is shown while it changes. */
+  const [stretching, setStretching] = useState(false);
+  /** Moves the floating block by its blue square, or stretches it by an edge or a corner. */
+  const startDrag = (e: React.PointerEvent, how: 'move' | Side) => {
+    if (!attrs.float || box) return;
+    if (!selected) select();
+    // A drawing's height follows its width: its top and bottom edges and corners pull the width too.
+    const fig = innerRef.current?.querySelector<HTMLElement>('.sketch-figure');
+    const fs = fig ? parseFloat(getComputedStyle(fig).fontSize) || 16 : 16;
+    const code = attrs.code;
+    setStretching(how !== 'move');
+    dragBlock(e, how, {
+      start: { x: attrs.x, y: attrs.y, w: attrs.w },
+      heightAt: sketch ? (w) => heightOf(code, w, fs) : null,
+      place: (b) => ({
+        ...b,
+        x: Math.min(Math.max(b.x, -geo.margin.left + 4), geo.contentW + geo.margin.right - b.w - 4),
+        y: Math.max(b.y, -geo.margin.top),
+      }),
+      minW: 160,
+      maxW: geo.sheet.w - 8,
+      onDrag: setDrag, // also turns off pointer events in the iframe while dragging
+      onDone: (b) => {
+        setDrag(null);
+        setStretching(false);
+        updateAttributes(b);
+      },
+    });
+  };
+
+  /** The block on the sheet, from the window's title. */
+  const showBlock = () => {
+    innerRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    select();
   };
 
   return (
@@ -229,76 +273,81 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
       style={attrs.float ? { left: pos.x, top: pos.y, width: pos.w } : { paddingBottom: pad }}
     >
       <div ref={innerRef} className="html-block-inner">
-      <div
-        className="html-block-head"
-        contentEditable={false}
-        onPointerDown={(e) => {
-          // A floating block is dragged by its whole header; the title is edited with a double click.
-          const target = e.target as HTMLElement;
-          if (!attrs.float || target.closest('button, .pen-menu')) return;
-          if (target.matches('input') && document.activeElement === target) return;
-          startDrag(e, 'move');
-        }}
-      >
-        {attrs.float ? (
-          <span className="grip" title="Перетащить по листу">
-            ✥
-          </span>
-        ) : (
-          <span className="grip" data-drag-handle title="Перетащить блок">
-            ⠿
-          </span>
-        )}
-        <input
-          className="html-block-title"
-          value={attrs.title}
-          onChange={(e) => updateAttributes({ title: e.target.value })}
-          onDoubleClick={(e) => {
-            e.currentTarget.focus();
-            e.currentTarget.select();
-          }}
-          aria-label="Название блока"
-        />
-        <div className="html-block-tools">
-          <button
-            className={attrs.float ? 'on' : ''}
-            onClick={toggleFloat}
-            title={attrs.float ? 'Вернуть блок в текст' : 'Положить блок поверх текста и двигать свободно'}
-          >
-            {attrs.float ? '↧ В текст' : '⇱ Поверх'}
-          </button>
-          {sketch ? (
-            <>
-              <PenMenu pen={attrs.pen} onChange={(pen) => updateAttributes({ pen })} />
-              <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
-                Команды
-              </button>
-              <button onClick={() => setHelp(true)} title="Все команды, примеры и запрос для нейронки">
-                ? Справка
-              </button>
-            </>
-          ) : (
-            <>
-              <button className={panel === 'data' ? 'on' : ''} onClick={() => setPanel(panel === 'data' ? null : 'data')}>
-                Данные
-              </button>
-              <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
-                Код
-              </button>
-              <button onClick={() => setReloadKey((k) => k + 1)} title="Перезапустить блок">
-                ↻
-              </button>
-            </>
+      {selected ? (
+        <BlockBar>
+          {box && (
+            <span className="grip" title="Чертёж по бланку: стоит там, где задано в НаБланке(…); начало можно сменить пипеткой «⌖ Начало»">
+              ⌖
+            </span>
           )}
-          <button onClick={() => deleteNode()} title="Удалить блок" className="danger">
-            ✕
-          </button>
-        </div>
-      </div>
-
+          <input
+            className="html-block-title"
+            value={attrs.title}
+            onChange={(e) => updateAttributes({ title: e.target.value })}
+            onDoubleClick={(e) => {
+              e.currentTarget.focus();
+              e.currentTarget.select();
+            }}
+            aria-label="Название блока"
+          />
+          <div className="html-block-tools">
+            {!box && (
+              <button
+                className={attrs.float ? 'on' : ''}
+                onClick={toggleFloat}
+                title={attrs.float ? 'Вернуть блок в текст' : 'Положить блок поверх текста и двигать свободно'}
+              >
+                {attrs.float ? '↧ В текст' : '⇱ Поверх'}
+              </button>
+            )}
+            {sketch ? (
+              <>
+                <PenMenu pen={attrs.pen} onChange={(pen) => updateAttributes({ pen })} />
+                <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
+                  Команды
+                </button>
+                <button onClick={() => setHelp(true)} title="Все команды, примеры и запрос для нейронки">
+                  ? Справка
+                </button>
+              </>
+            ) : (
+              <>
+                <button className={panel === 'data' ? 'on' : ''} onClick={() => setPanel(panel === 'data' ? null : 'data')}>
+                  Данные
+                </button>
+                <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel(panel === 'code' ? null : 'code')}>
+                  Код
+                </button>
+                <button onClick={() => setReloadKey((k) => k + 1)} title="Перезапустить блок">
+                  ↻
+                </button>
+              </>
+            )}
+            <button onClick={() => deleteNode()} title="Удалить блок" className="danger">
+              ✕
+            </button>
+          </div>
+        </BlockBar>
+      ) : (
+        <BlockShield onSelect={select} />
+      )}
+      {!box && (selected || attrs.float) && (
+        <BlockHandles
+          onMove={attrs.float ? (e) => startDrag(e, 'move') : undefined}
+          onStretch={attrs.float && selected ? startDrag : undefined}
+          sides={sidesFor(sketch)}
+        />
+      )}
+      {drag && stretching && <span className="block-size no-print">{Math.round(drag.w / MM)} мм</span>}
       {sketch ? (
         <>
-          <SketchFigure code={attrs.code} pen={attrs.pen} placeholder="Пустой чертёж: напишите команды ниже или вставьте ответ нейронки. «? Справка» — все команды и готовый запрос." />
+          <SketchFigure
+            code={attrs.code}
+            pen={attrs.pen}
+            width={box?.w}
+            fontSize={onBlank ? noteFontSize(onBlank.blank.letters ?? BLANK_LETTERS) : undefined}
+            sheetMap={box ? onBlank?.map : null}
+            placeholder="Пустой чертёж: напишите команды в окне слева или вставьте ответ нейронки. «? Справка» — все команды и готовый запрос." />
           {sketchErrors > 0 && !panel && (
             <button className="sketch-badge no-print" contentEditable={false} onClick={() => setPanel('code')}>
               ⚠ Строк с ошибками: {sketchErrors} — открыть команды
@@ -319,11 +368,36 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
       ) : (
         <div style={{ height }} />
       )}
-
+      </div>
       {panel && (
-        <div className="html-block-panel" contentEditable={false}>
+        <SideEditor
+          title={sketch ? `Команды — ${attrs.title}` : attrs.title}
+          onTitle={showBlock}
+          onClose={() => setPanel(null)}
+          tools={
+            sketch ? (
+              <button onClick={() => setHelp(true)} title="Все команды, примеры и запрос для нейронки">
+                ? Справка
+              </button>
+            ) : (
+              <>
+                <button className={panel === 'code' ? 'on' : ''} onClick={() => setPanel('code')}>
+                  Код
+                </button>
+                <button className={panel === 'data' ? 'on' : ''} onClick={() => setPanel('data')}>
+                  Данные
+                </button>
+              </>
+            )
+          }
+        >
           {sketch ? (
-            <SketchPanel code={attrs.code} onChange={(code) => updateAttributes({ code })} onHelp={() => setHelp(true)} />
+            <SketchPanel
+              code={attrs.code}
+              onChange={(code) => updateAttributes({ code })}
+              onHelp={() => setHelp(true)}
+              onPick={onBlank ? setPicking : undefined}
+            />
           ) : panel === 'code' ? (
             <>
               <CodeEditor value={draftCode} language="html" onChange={setDraftCode} onSubmit={applyCode} />
@@ -352,12 +426,18 @@ export function HtmlBlockView({ node, editor, getPos, updateAttributes, deleteNo
               </div>
             </>
           )}
-        </div>
+        </SideEditor>
       )}
-      </div>
       {help && <SketchHelp onClose={() => setHelp(false)} onInsert={insertIntoSketch} />}
-      {attrs.float && (
-        <span className="resize-handle" contentEditable={false} onPointerDown={(e) => startDrag(e, 'resize')} title="Ширина блока" />
+      {picking && onBlank && (
+        <BlankPicker
+          on={onBlank}
+          sheet={geo.sheet}
+          mode={picking}
+          code={attrs.code}
+          onCode={(code) => updateAttributes({ code })}
+          onClose={() => setPicking(null)}
+        />
       )}
     </NodeViewWrapper>
   );

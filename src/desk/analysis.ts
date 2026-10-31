@@ -66,6 +66,33 @@ export interface Margins {
 
 export const NO_MARGINS: Margins = { left: null, right: null, top: null, bottom: null };
 
+/**
+ * A margin line by its two ends, mm: where it crosses the edges it runs
+ * between — a vertical one the top (`a`) and the bottom (`b`) edge, a
+ * horizontal one the left (`a`) and the right (`b`) edge.
+ */
+export interface MarginLine {
+  a: number;
+  b: number;
+}
+
+/** Margin lines by their ends: each can lean its own way. */
+export type HandMargins = Record<keyof Margins, MarginLine | null>;
+
+/** Where a margin line is at `t` along it (0: its `a` end, 1: its `b` end). */
+export const along = (l: MarginLine, t: number) => l.a + (l.b - l.a) * t;
+
+/**
+ * Margin lines by their ends, on paper of `paperMm`. Those given by one
+ * number (found, or kept before lines had ends) lean with the printed lines
+ * of `slope`.
+ */
+export function marginLines(m: Margins | HandMargins, slope: number, [w, h]: [number, number]): HandMargins {
+  const line = (v: number | MarginLine | null, vertical: boolean): MarginLine | null =>
+    v === null || typeof v !== 'number' ? v : { a: v, b: vertical ? v - h * slope : v + w * slope };
+  return { left: line(m.left, true), right: line(m.right, true), top: line(m.top, false), bottom: line(m.bottom, false) };
+}
+
 /** A notebook's printed lines, mm on the sheet: rows at y = offset + k·step + x·slope. */
 export interface Ruling {
   kind: 'ruled' | 'grid';
@@ -103,6 +130,21 @@ export interface BendFit {
   grid: Grid;
   before: number;
   after: number;
+}
+
+/**
+ * How the phone was held over the desk, read off the photo's straight lines
+ * (their vanishing points).
+ */
+export interface Tilt {
+  /** Row-major 3×3: its columns are the sheet's right, its down and its normal in the camera's axes (x right, y down, z forward). */
+  rot: number[];
+  /** 0..1: how sure. */
+  confidence: number;
+  /** `two`: both of the sheet's directions converge in the photo; `one`: only one (the rest is the smallest tilt agreeing with it). */
+  by: 'two' | 'one';
+  /** The segments that agree, photo px: [ax, ay, bx, by, family] (0: across the sheet, 1: down it). */
+  lines: number[][];
 }
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
@@ -154,6 +196,8 @@ export class Analyzer {
   bend = (warp: Warp, wMm: number, hMm: number, r: Ruling, nx: number, ny: number) =>
     this.call<BendFit>({ op: 'bend', warp, wMm, hMm, step: r.step, offset: r.offset, slope: r.slope, nx, ny });
   mask = (corners: Pt[], wMm: number, hMm: number, scale = 2) => this.call<ObjectMask>({ op: 'mask', corners, wMm, hMm, scale });
+  /** `focal`: the lens's focal length, photo px. */
+  perspective = (focal: number) => this.call<Tilt | null>({ op: 'perspective', focal });
 
   dispose() {
     this.worker.terminate();

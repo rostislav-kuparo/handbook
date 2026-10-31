@@ -36,6 +36,8 @@ export const CHAR_GROUPS: CharGroup[] = [
   { id: 'lat-upper', title: 'Latin', chars: range('A', 'Z'), shelf: 'lat-upper' },
   { id: 'digits', title: 'Цифры', chars: range('0', '9'), shelf: 'sym' },
   { id: 'punct', title: 'Знаки', chars: [...'.,!?:;-—«»"()№%+=/'], shelf: 'sym' },
+  // Roman numerals as written by hand (sticks with serifs): used for I, II, IV чверті… instead of drawn sticks.
+  { id: 'roman', title: 'Римские цифры', chars: ['Ⅰ', 'Ⅴ', 'Ⅹ', 'Ⅼ', 'Ⅽ', 'Ⅾ', 'Ⅿ'], shelf: 'sym' },
   { id: 'math', title: 'Формулы', chars: [...'αβγδεθλμπρσφωΔΣΩ×·−±≠≈≤≥<>°′⊥∥∠△√∞∈→'], shelf: 'sym' },
 ];
 

@@ -17,7 +17,11 @@
 use write_fonts::read::tables::glyf::CurvePoint;
 use write_fonts::tables::cmap::Cmap;
 use write_fonts::tables::glyf::{Contour, GlyfLocaBuilder, Glyph, SimpleGlyph};
-use write_fonts::tables::gpos::{Class1Record, Class2Record, Gpos, PairPos, PositionLookup, PositionLookupList, ValueRecord};
+use write_fonts::tables::gdef::Gdef;
+use write_fonts::tables::gpos::{
+    AnchorTable, BaseArray, BaseRecord, Class1Record, Class2Record, Gpos, MarkArray, MarkBasePosFormat1, MarkRecord, PairPos,
+    PositionLookup, PositionLookupList, ValueRecord,
+};
 use write_fonts::tables::gsub::{
     Gsub, Ligature, LigatureSet, LigatureSubstFormat1, SingleSubst, SubstitutionChainContext, SubstitutionLookup,
     SubstitutionLookupList,
@@ -179,6 +183,12 @@ pub fn build_font(opts: &FontOptions, keys: &[KeyGlyphs]) -> Result<Vec<u8>, Str
         }
         if k.variants.is_empty() {
             k.variants = vec![FontGlyph { advance: 300, ..Default::default() }; n];
+        }
+        // Marks take no room of their own: GPOS puts them over the letter before.
+        if is_mark_key(&k.key) {
+            for g in k.variants.iter_mut().chain(&mut k.medial).chain(&mut k.alts).chain(&mut k.isolated) {
+                g.advance = 0;
+            }
         }
     }
 
@@ -372,12 +382,88 @@ pub fn build_font(opts: &FontOptions, keys: &[KeyGlyphs]) -> Result<Vec<u8>, Str
     if let Some(gsub) = build_gsub(&keys, &blocks, &singles, n, num_glyphs) {
         fb.add_table(&gsub).map_err(|e| e.to_string())?;
     }
-    if opts.kerning {
-        if let Some(gpos) = build_gpos(&keys, &blocks, num_glyphs, opts.letter_spacing) {
-            fb.add_table(&gpos).map_err(|e| e.to_string())?;
-        }
+    if keys.iter().any(|k| is_mark_key(&k.key)) {
+        fb.add_table(&build_gdef(&keys, &blocks)).map_err(|e| e.to_string())?;
+    }
+    if let Some(gpos) = build_gpos(&keys, &blocks, num_glyphs, opts.letter_spacing, opts.kerning) {
+        fb.add_table(&gpos).map_err(|e| e.to_string())?;
     }
     Ok(fb.build())
+}
+
+fn is_mark_key(key: &str) -> bool {
+    let mut it = key.chars();
+    matches!((it.next(), it.next()), (Some(c), None) if crate::derive::is_mark(c))
+}
+
+/// Every glyph id of a key with its glyph (all blocks, in glyph order).
+fn key_glyph_ids<'a>(k: &'a KeyGlyphs, b: &Block) -> impl Iterator<Item = (u16, &'a FontGlyph)> {
+    [(Some(b.base), &k.variants), (b.medial, &k.medial), (b.alt, &k.alts), (b.iso, &k.isolated)]
+        .into_iter()
+        .filter_map(|(start, list)| start.map(|s| (s, list)))
+        .flat_map(|(s, list)| list.iter().enumerate().map(move |(i, g)| (s + i as u16, g)))
+}
+
+/// Glyph classes: marks apart from the rest (shapers then give them no advance and kerning skips them).
+fn build_gdef(keys: &[KeyGlyphs], blocks: &[Block]) -> Gdef {
+    let classes: ClassDef = keys
+        .iter()
+        .zip(blocks)
+        .flat_map(|(k, b)| {
+            let class = if is_mark_key(&k.key) { 3 } else { 1 };
+            key_glyph_ids(k, b).map(move |(g, _)| (GlyphId16::new(g), class))
+        })
+        .collect();
+    Gdef::new(Some(classes), None, None, None)
+}
+
+/// Bounding box of a glyph's control points (min x, min y, max x, max y).
+fn glyph_bbox(g: &FontGlyph) -> Option<[i16; 4]> {
+    let mut pts = g.contours.iter().flatten();
+    let first = *pts.next()?;
+    Some(pts.fold([first[0], first[1], first[0], first[1]], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]))
+}
+
+/// Mark-to-base positioning: a mark's bottom centre goes over the letter's
+/// top centre (at least the x-height), like [`crate::derive::put_mark`] in ink.
+/// Several subtables keep each one's offsets small.
+fn mark_lookup(keys: &[KeyGlyphs], blocks: &[Block]) -> Option<PositionLookup> {
+    // Anchors on a 10-unit grid: equal ones are shared in the font file.
+    let snap = |v: f64| ((v / 10.0).round() * 10.0) as i16;
+    let mut marks: Vec<(u16, AnchorTable)> = Vec::new();
+    let mut bases: Vec<(u16, AnchorTable)> = Vec::new();
+    for (k, b) in keys.iter().zip(blocks) {
+        let mark = is_mark_key(&k.key);
+        for (g, glyph) in key_glyph_ids(k, b) {
+            let Some([x0, y0, x1, y1]) = glyph_bbox(glyph) else { continue };
+            let cx = (x0 as f64 + x1 as f64) / 2.0;
+            if mark {
+                marks.push((g, AnchorTable::format_1(snap(cx), snap(y0 as f64))));
+            } else {
+                let top = (y1 as f64).max(X_HEIGHT) + crate::derive::MARK_GAP;
+                bases.push((g, AnchorTable::format_1(snap(cx), snap(top))));
+            }
+        }
+    }
+    if marks.is_empty() || bases.is_empty() {
+        return None;
+    }
+    marks.sort_by_key(|m| m.0);
+    bases.sort_by_key(|b| b.0);
+    let mark_cov = coverage(marks.iter().map(|m| m.0).collect());
+    let mark_array = MarkArray::new(marks.into_iter().map(|(_, a)| MarkRecord::new(0, a)).collect());
+    let subtables = bases
+        .chunks(1500)
+        .map(|chunk| {
+            MarkBasePosFormat1::new(
+                mark_cov.clone(),
+                coverage(chunk.iter().map(|b| b.0).collect()),
+                mark_array.clone(),
+                BaseArray::new(chunk.iter().map(|(_, a)| BaseRecord::new(vec![Some(a.clone())])).collect()),
+            )
+        })
+        .collect();
+    Some(PositionLookup::MarkToBase(Lookup::new(LookupFlag::empty(), subtables)))
 }
 
 fn scripts(feature_count: u16) -> ScriptList {
@@ -707,12 +793,29 @@ fn build_gsub(keys: &[KeyGlyphs], blocks: &[Block], singles: &[(char, u16)], n: 
     Some(Gsub::new(scripts(1), feature_list, SubstitutionLookupList::new(lookups)))
 }
 
-fn build_gpos(keys: &[KeyGlyphs], blocks: &[Block], num_glyphs: usize, letter_spacing: f64) -> Option<Gpos> {
+fn build_gpos(keys: &[KeyGlyphs], blocks: &[Block], num_glyphs: usize, letter_spacing: f64, kerning: bool) -> Option<Gpos> {
+    let mut lookups = Vec::new();
+    let mut features = Vec::new();
+    if let Some(kern) = kerning.then(|| kern_lookup(keys, blocks, num_glyphs, letter_spacing)).flatten() {
+        features.push(FeatureRecord::new(Tag::new(b"kern"), Feature::new(None, vec![lookups.len() as u16])));
+        lookups.push(kern);
+    }
+    if let Some(mark) = mark_lookup(keys, blocks) {
+        features.push(FeatureRecord::new(Tag::new(b"mark"), Feature::new(None, vec![lookups.len() as u16])));
+        lookups.push(mark);
+    }
+    if lookups.is_empty() {
+        return None;
+    }
+    Some(Gpos::new(scripts(features.len() as u16), FeatureList::new(features), PositionLookupList::new(lookups)))
+}
+
+fn kern_lookup(keys: &[KeyGlyphs], blocks: &[Block], num_glyphs: usize, letter_spacing: f64) -> Option<PositionLookup> {
     // Kerning classes: one per key (all its glyphs, base and alternates).
     // Spaces get classes too: a joining letter whose ink overhangs its exit
-    // must not eat the following space.
+    // must not eat the following space. Marks stay out (class 0).
     let is_space = |i: usize| keys[i].key.chars().all(char::is_whitespace);
-    let kerned: Vec<usize> = (0..keys.len()).collect();
+    let kerned: Vec<usize> = (0..keys.len()).filter(|&i| !is_mark_key(&keys[i].key)).collect();
     if kerned.iter().filter(|&&i| !is_space(i)).count() < 1 {
         return None;
     }
@@ -782,9 +885,8 @@ fn build_gpos(keys: &[KeyGlyphs], blocks: &[Block], num_glyphs: usize, letter_sp
         ClassDef::format_1(GlyphId16::new(1), class_of),
         records,
     );
-    let lookups = PositionLookupList::new(vec![PositionLookup::Pair(Lookup::new(LookupFlag::empty(), vec![pair]))]);
-    let features = FeatureList::new(vec![FeatureRecord::new(Tag::new(b"kern"), Feature::new(None, vec![0]))]);
-    Some(Gpos::new(scripts(1), features, lookups))
+    // Kerning looks past marks: x̄ kerns with the next letter like x.
+    Some(PositionLookup::Pair(Lookup::new(LookupFlag::IGNORE_MARKS, vec![pair])))
 }
 
 #[cfg(test)]
@@ -818,6 +920,25 @@ mod tests {
             out.glyph_infos().iter().map(|g| g.glyph_id).collect(),
             out.glyph_positions().iter().map(|p| p.x_advance).collect(),
         )
+    }
+
+    #[test]
+    fn mark_sits_over_the_letter_before_it() {
+        let n = 3;
+        let x = KeyGlyphs { key: "x".into(), variants: vec![FontGlyph { contours: vec![rect(40, 0, 440, 450)], advance: 480, entry: None, exit: None }; n], medial: vec![], alts: vec![], isolated: vec![] };
+        let bar = FontGlyph { contours: vec![rect(30, 0, 330, 40)], advance: 360, entry: None, exit: None };
+        let mark = KeyGlyphs { key: "\u{0304}".into(), variants: vec![bar; n], medial: vec![], alts: vec![], isolated: vec![] };
+        let font = build_font(&opts(n), &[x, mark]).unwrap();
+        let face = rustybuzz::Face::from_slice(&font, 0).unwrap();
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str("x\u{0304}x");
+        let out = rustybuzz::shape(&face, &[], buf);
+        let pos = out.glyph_positions();
+        assert_eq!(out.glyph_infos().len(), 3);
+        assert_eq!(pos[1].x_advance, 0, "the mark takes no room");
+        // Bar centre (180) over the x's centre (240), 450 + gap above the baseline.
+        assert_eq!(pos[0].x_advance + pos[1].x_offset + 180, 240);
+        assert_eq!(pos[1].y_offset, 450 + crate::derive::MARK_GAP as i32);
     }
 
     #[test]

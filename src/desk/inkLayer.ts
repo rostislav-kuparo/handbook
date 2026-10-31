@@ -1,10 +1,12 @@
 // The ink of one document sheet, ready to be written onto a photo: the
 // ink-only page export, placed on the photographed paper and rasterised at the
 // size the photo needs — plus what the pen did along each stroke.
-import { documentPages, type DrawingFit, type PageExport, type PenStroke } from '../editor/exporters';
+import { documentPages, type DrawingFit, type PageExport, type PenStroke, type SheetLayers } from '../editor/exporters';
+import type { WorkMap } from '../wear/wear';
 import { LINE_HEIGHT_EM } from '../editor/layout';
 import { A4, geometry, MM, type PageSetup, type SheetSize } from '../editor/page';
-import type { Margins, Ruling } from './analysis';
+import { printMatrix, type PrintChoice } from '../blank/print';
+import { along, type HandMargins, type MarginLine, type Ruling } from './analysis';
 import type { Placement } from './compose';
 import { homography, invert, maxStretch, mul, type Mat3, type Pt } from './homography';
 import { warpMap, type Warp } from './warp';
@@ -36,7 +38,7 @@ const MIN_PEN = 0.3 * MM;
 /**
  * A notebook's printed lines in paper pixels: rows at y = offset + k·step +
  * x·slope; squares' columns at x = offset + k·step (before the lean); its
- * margin lines.
+ * margin lines by their ends.
  */
 export interface Lines {
   kind: 'ruled' | 'grid';
@@ -44,13 +46,13 @@ export interface Lines {
   offset: number;
   slope: number;
   cols: { offset: number; step: number } | null;
-  margins: Margins;
+  margins: HandMargins;
 }
 
-const px = (mm: number | null) => (mm === null ? null : mm * MM);
+const px = (l: MarginLine | null) => l && { a: l.a * MM, b: l.b * MM };
 
 /** The lines found on a sheet (mm), with these margins (those found, or moved by hand). */
-export const linesOf = (r: Ruling, margins: Margins = r.margins): Lines => ({
+export const linesOf = (r: Ruling, margins: HandMargins): Lines => ({
   kind: r.kind,
   step: r.step * MM,
   offset: r.offset * MM,
@@ -60,9 +62,9 @@ export const linesOf = (r: Ruling, margins: Margins = r.margins): Lines => ({
 });
 
 /** Margin lines from mm to paper px. */
-export const marginsPx = (m: Margins): Margins => ({ left: px(m.left), right: px(m.right), top: px(m.top), bottom: px(m.bottom) });
+export const marginsPx = (m: HandMargins): HandMargins => ({ left: px(m.left), right: px(m.right), top: px(m.top), bottom: px(m.bottom) });
 
-const hasAny = (m: Margins | null): m is Margins => !!m && (m.left !== null || m.right !== null || m.top !== null || m.bottom !== null);
+const hasAny = (m: HandMargins | null): m is HandMargins => !!m && (m.left !== null || m.right !== null || m.top !== null || m.bottom !== null);
 
 /** Paper of `mm` (width, height) in CSS px; A4 exactly as the document's sheet. */
 export function paperSize([w, h]: [number, number]): SheetSize {
@@ -89,9 +91,14 @@ export interface InkLayout {
   ref: { lines: Lines; first: number; pitch: number } | null;
   /** Size of the letters, px. */
   fontSize: number;
+  /** Every sheet's text, drawings and rubbed graphite apart (each can be left out of the photo). */
+  layers: SheetLayers[];
+  /** What was done on every sheet (where the compasses stood: the needle's dents). */
+  work: WorkMap[];
 }
 
-const IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+/** Shifts the text along by `tilt` per pixel down: its lines start along a leaning margin line. */
+const lean = (tilt: number): Mat3 => [1, tilt, 0, 0, 1, 0, 0, 0, 1];
 
 /** Where the page goes on a photographed sheet: page px → paper px, on paper of this size (px). */
 export interface OnPaper {
@@ -115,32 +122,36 @@ export async function inkLayout(
   mode: FitMode,
   lines: Lines | null = null,
   choice: LineChoice = AUTO_LINES,
-  margins: Margins | null = null,
+  margins: HandMargins | null = null,
 ): Promise<InkLayout> {
   const paper = paperSize(paperMm);
   const strokes: PenStroke[][] = [];
+  const layers: SheetLayers[] = [];
+  const work: WorkMap[] = [];
   const g = base.geo;
   // Margins drawn by hand on paper without printed lines (px).
   const loose = !lines && hasAny(margins) ? margins : null;
-  if (isA4(paperMm) && !lines && !loose) mode = 'document';
+  // Paper the same as the editor's sheet takes the sheet as it is.
+  if (Math.abs(paper.w - g.sheet.w) < 2 && Math.abs(paper.h - g.sheet.h) < 2 && !lines && !loose) mode = 'document';
   if (mode === 'document' && lines) return asInDocument(base, setup, paper, lines, choice);
   if (mode === 'document') {
-    // The A4 sheet as it is, shrunk into the margins or onto the whole paper, centred.
+    // The editor's sheet as it is (A4, or a blank's paper), shrunk into the margins or onto the whole paper, centred.
     const box = loose ? textBox(loose, setup, paper) : null;
     const [bx, by, bw, bh] = box ? [box.left, box.top, paper.w - box.left - box.right, paper.h - box.top - box.bottom] : [0, 0, paper.w, paper.h];
-    const k = box ? Math.min(bw / g.contentW, bh / g.contentH) : Math.min(paper.w / A4.w, paper.h / A4.h);
+    const k = box ? Math.min(bw / g.contentW, bh / g.contentH) : Math.min(paper.w / g.sheet.w, paper.h / g.sheet.h);
     const place = box
-      ? [k, 0, bx - g.margin.left * k, 0, k, by - g.margin.top * k, 0, 0, 1]
-      : [k, 0, (paper.w - A4.w * k) / 2, 0, k, (paper.h - A4.h * k) / 2, 0, 0, 1];
-    const pages = await documentPages(base, { inkOnly: true, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
-    return { pages, strokes, size: A4, paper, place, ref: null, fontSize: base.fontSize };
+      ? mul(lean(box.tilt), [k, 0, bx - g.margin.left * k, 0, k, by - g.margin.top * k, 0, 0, 1])
+      : [k, 0, (paper.w - g.sheet.w * k) / 2, 0, k, (paper.h - g.sheet.h * k) / 2, 0, 0, 1];
+    const pages = await documentPages(base, { inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
+    return { pages, strokes, size: g.sheet, paper, place, ref: null, fontSize: base.fontSize, layers, work };
   }
   if (!lines) {
     const box = loose ? textBox(loose, setup, paper) : null;
     const fitted: PageSetup = box ? { ...setup, margins: { top: box.top / MM, bottom: box.bottom / MM, left: box.left / MM, right: box.right / MM } } : setup;
     const geo = geometry(fitted, paper, true);
-    const pages = await documentPages({ ...base, geo }, { inkOnly: true, strokes, drawings: { width: g.contentW, minPen: MIN_PEN } });
-    return { pages, strokes, size: paper, paper, place: IDENTITY, ref: null, fontSize: base.fontSize };
+    // Re-flowed onto other paper: not the editor's lines.
+    const pages = await documentPages({ ...base, geo, layout: null }, { inkOnly: true, layers, work, strokes, drawings: { width: g.contentW, minPen: MIN_PEN } });
+    return { pages, strokes, size: paper, paper, place: lean(box?.tilt ?? 0), ref: null, fontSize: base.fontSize, layers, work };
   }
   // A line of text per ruled line, or per two squares, unless chosen otherwise; letters filling it.
   const pitch = (choice.every ?? (lines.kind === 'grid' ? 2 : 1)) * lines.step;
@@ -148,7 +159,7 @@ export async function inkLayout(
   const lh = fontSize * LINE_HEIGHT_EM;
   // Where the ruled paper of the editor puts the first baseline below the top margin (exporters/Paper).
   const baseline = fontSize * 1.075 + 2;
-  const { left, right, top, bottom } = textBox(lines.margins, setup, paper);
+  const { left, right, top, bottom, tilt } = textBox(lines.margins, setup, paper);
   const first = Math.ceil((top + baseline - lines.offset) / lines.step);
   const firstY = lines.offset + first * lines.step;
   const fitted: PageSetup = { ...setup, margins: { top: (firstY - baseline) / MM, bottom: bottom / MM, left: left / MM, right: right / MM } };
@@ -161,8 +172,25 @@ export async function inkLayout(
     grid: squaresOf(lines, choice, 1, [geo.margin.left, geo.margin.top]),
     minPen: MIN_PEN,
   };
-  const pages = await documentPages({ ...base, fontSize, geo }, { inkOnly: true, strokes, pitch, drawings });
-  return { pages, strokes, size: paper, paper, place: IDENTITY, ref: { lines, first, pitch }, fontSize };
+  const pages = await documentPages({ ...base, fontSize, geo, layout: null }, { inkOnly: true, layers, work, strokes, pitch, drawings });
+  return { pages, strokes, size: paper, paper, place: lean(tilt), ref: { lines, first, pitch }, fontSize, layers, work };
+}
+
+/**
+ * A document on a blank: its sheet is the blank's paper, printed onto the
+ * photographed paper of `paperMm` — the ink goes exactly where the printer
+ * puts the blank (`printMatrix`), nothing re-flowed.
+ */
+export async function blankLayout(base: PageExport, paperMm: [number, number], print: PrintChoice, shrink = 1): Promise<InkLayout> {
+  const paper = paperSize(paperMm);
+  const size = base.geo.sheet;
+  const place = printMatrix(size, paper, print, shrink);
+  const k = Math.hypot(place[0], place[3]);
+  const strokes: PenStroke[][] = [];
+  const layers: SheetLayers[] = [];
+  const work: WorkMap[] = [];
+  const pages = await documentPages(base, { inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
+  return { pages, strokes, size, paper, place, ref: null, fontSize: base.fontSize, layers, work };
 }
 
 /**
@@ -175,19 +203,34 @@ function squaresOf(lines: Lines, choice: LineChoice, k: number, origin: [number,
   return { cell: lines.step / k, x: (lines.cols.offset - origin[0]) / k, y: (lines.offset - origin[1]) / k };
 }
 
+/** How far the lines of text lean along, px per px down: as the margin line they start at (the left one, else the right one). */
+function tiltOf(m: HandMargins, paper: SheetSize): number {
+  const lead = m.left ?? m.right;
+  return lead ? (lead.b - lead.a) / paper.h : 0;
+}
+
 /**
  * Where the text goes on a sheet with margin lines (paper px): right of one
  * on the left (14 px, as on the editor's paper) and 3 mm before one on the
  * right — the spiral's holes are beyond it; with a margin only on the right,
  * near the left edge; below one at the top, above one at the bottom. Paper px
- * from each edge.
+ * from each edge, at the top edge: the text leans along by `tilt` (see
+ * `lean`). Leaning margins keep the text off them everywhere: the right edge
+ * where the right line comes nearest the leaning text, the top and the bottom
+ * below and above their lines' lowest and highest end.
  */
-function textBox(m: Margins, setup: PageSetup, paper: SheetSize) {
+function textBox(m: HandMargins, setup: PageSetup, paper: SheetSize) {
+  const tilt = tiltOf(m, paper);
+  const top = m.top ? Math.max(m.top.a, m.top.b) + 2 * MM : Math.max(setup.margins.top, 5) * MM;
+  const bottom = m.bottom ? paper.h - Math.min(m.bottom.a, m.bottom.b) + 2 * MM : setup.margins.bottom * MM;
+  // How far right the text may go at height y, measured back to the top edge along its lean.
+  const edge = (y: number) => (m.right ? along(m.right, y / paper.h) - 3 * MM : paper.w - setup.margins.right * MM) - tilt * y;
   return {
-    left: m.left !== null ? m.left + 14 : m.right !== null ? 8 * MM : setup.margins.left * MM,
-    right: m.right !== null ? paper.w - m.right + 3 * MM : setup.margins.right * MM,
-    top: m.top !== null ? m.top + 2 * MM : Math.max(setup.margins.top, 5) * MM,
-    bottom: m.bottom !== null ? paper.h - m.bottom + 2 * MM : setup.margins.bottom * MM,
+    left: m.left ? m.left.a + 14 : m.right ? 8 * MM : setup.margins.left * MM,
+    right: paper.w - Math.min(edge(top), edge(paper.h - bottom)),
+    top,
+    bottom,
+    tilt,
   };
 }
 
@@ -220,12 +263,14 @@ async function asInDocument(base: PageExport, setup: PageSetup, paper: SheetSize
   const baseline = base.fontSize * 1.075 + 2;
   const first = Math.ceil((box.top + baseline * k - lines.offset) / lines.step);
   const firstY = lines.offset + first * lines.step;
-  const place = [k, 0, box.left - g.margin.left * k, 0, k, firstY - (g.margin.top + baseline) * k, 0, 0, 1];
+  const place = mul(lean(box.tilt), [k, 0, box.left - g.margin.left * k, 0, k, firstY - (g.margin.top + baseline) * k, 0, 0, 1]);
   // Drawings as in the editor, keeping their room on the sheet; on squares, by them.
   const drawings: DrawingFit = { keepPages: true, grid: squaresOf(lines, choice, k, [box.left, firstY - baseline * k]), minPen: MIN_PEN / k };
   const strokes: PenStroke[][] = [];
-  const pages = await documentPages({ ...base, geo: { ...g, sheet: size } }, { inkOnly: true, strokes, pitch: docPitch, drawings });
-  return { pages, strokes, size, paper, place, ref: { lines, first, pitch }, fontSize: base.fontSize };
+  const layers: SheetLayers[] = [];
+  const work: WorkMap[] = [];
+  const pages = await documentPages({ ...base, geo: { ...g, sheet: size } }, { inkOnly: true, layers, work, strokes, pitch: docPitch, drawings });
+  return { pages, strokes, size, paper, place, ref: { lines, first, pitch }, fontSize: base.fontSize, layers, work };
 }
 
 /**
@@ -242,15 +287,17 @@ export function placeOn(layout: InkLayout, own: Lines | null, paper: SheetSize):
   const sy = own.step / r.step;
   const yRef = r.offset + ref.first * r.step;
   const yOwn = own.offset + ref.first * own.step;
-  // Along by the margin line both sheets have: the left one, else the right one.
-  const [a, b] = [own.margins, r.margins];
-  const dx = a.left !== null && b.left !== null ? a.left - b.left : a.right !== null && b.right !== null ? a.right - b.right : 0;
-  // x' = x + dx;  y' = yOwn + (y − yRef)·sy + x'·slope
-  return { place: mul([1, 0, dx, own.slope, sy, yOwn - yRef * sy + dx * own.slope, 0, 0, 1], layout.place), paper };
+  // Along by the margin line both sheets have (the left one, else the right one): from the reference's onto this one, with its lean.
+  const side = own.margins.left && r.margins.left ? 'left' : own.margins.right && r.margins.right ? 'right' : null;
+  const [a, b] = side ? [own.margins[side]!, r.margins[side]!] : [null, null];
+  const dx = a && b ? a.a - b.a : 0;
+  const dt = a && b ? (a.b - a.a) / paper.h - (b.b - b.a) / layout.paper.h : 0;
+  // x' = x + dx + y·dt;  y' = yOwn + (y − yRef)·sy + x'·slope
+  return { place: mul([1, dt, dx, own.slope, sy + dt * own.slope, yOwn - yRef * sy + dx * own.slope, 0, 0, 1], layout.place), paper };
 }
 
-/** How many times the page is scaled onto the paper (1 when the text is re-flowed onto it). */
-export const pageScale = (layout: InkLayout) => layout.place[0];
+/** How many times the page is scaled onto the paper (1 when the text is re-flowed onto it); turned or not. */
+export const pageScale = (layout: InkLayout) => Math.hypot(layout.place[0], layout.place[3]);
 
 /**
  * Page pixels → photo pixels. `corners`: the paper's top-left, top-right,
@@ -300,7 +347,13 @@ const MESH = 64;
  * triangles whose corners sit where the (possibly curved) sheet puts them.
  * Each vertex carries the perspective's w, so a flat sheet is drawn exactly.
  */
-export function placement(layout: InkLayout, warp: Warp, on = asLaid(layout)): Placement {
+/** What the camera adds to where the sheet lies: the paper's waves (sheet u, v → shift) and the lens (photo px → photo px). */
+export interface CameraExtras {
+  wave?: (u: number, v: number) => [number, number];
+  lens?: (p: Pt) => Pt;
+}
+
+export function placement(layout: InkLayout, warp: Warp, on = asLaid(layout), extras: CameraExtras = {}): Placement {
   const { place, paper } = on;
   const corners = warp.corners;
   const map = warpMap(warp);
@@ -315,7 +368,9 @@ export function placement(layout: InkLayout, warp: Warp, on = asLaid(layout)): P
       const y = pv * layout.size.h;
       const u = (place[0] * x + place[1] * y + place[2]) / paper.w;
       const v = (place[3] * x + place[4] * y + place[5]) / paper.h;
-      const p = map(u, v);
+      const [wu, wv] = extras.wave ? extras.wave(u, v) : [0, 0];
+      let p = map(u + wu, v + wv);
+      if (extras.lens) p = extras.lens(p);
       const w = Math.max(1e-6, h[6] * u + h[7] * v + h[8]);
       mesh.set([p[0], p[1], w, pu, pv], (j * n + i) * 5);
     }

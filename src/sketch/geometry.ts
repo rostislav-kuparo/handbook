@@ -233,6 +233,10 @@ export function mapShape(s: Shape, m: (p: Vec) => Vec, flip: boolean, scale: num
       return { type: 'angle', v: m(s.v), from: angleAt(s.v, s.from), sweep: flip ? -s.sweep : s.sweep };
     case 'polygon':
       return { type: 'polygon', pts: s.pts.map(m) };
+    case 'region':
+      return { type: 'region', pts: s.pts.map(m), hatch: { ...s.hatch, angle: angleAt({ x: 0, y: 0 }, s.hatch.angle) } };
+    case 'hatched':
+      return { ...s, a: m(s.a), b: m(s.b), side: m(s.side) };
     case 'text':
       return { type: 'text', text: s.text, at: s.at && m(s.at) };
     case 'space':
@@ -267,7 +271,10 @@ export function extentPoints(s: Shape): Vec[] {
       return out;
     }
     case 'polygon':
+    case 'region':
       return s.pts;
+    case 'hatched':
+      return [s.a, s.b];
     case 'angle':
       return [s.v];
     case 'text':

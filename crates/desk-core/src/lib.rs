@@ -5,14 +5,17 @@
 //! sheet and its edges to a fraction of a pixel, measures the photo's blur
 //! (on the sheet's edge) and noise (on the blank paper), maps the glare, reads
 //! the colour of a real pen from words written on the sheet, finds a
-//! notebook's printed lines and the things lying on the sheet.
+//! notebook's printed lines and the things lying on the sheet, and how the
+//! phone was held over it.
 
 mod calib;
 mod edges;
 mod img;
 mod light;
+mod lines;
 mod mask;
 mod noise;
+mod perspective;
 mod quad;
 mod rng;
 mod ruling;
@@ -53,7 +56,7 @@ pub fn find(photo: &Photo) -> Option<Sheet> {
     let bright = sheet::find_sheet(photo).filter(|f| f.confidence >= 0.6);
     if let Some(f) = bright.filter(|f| lined.as_ref().is_none_or(|b| quad::area(&f.corners) >= 0.7 * quad::area(&b.found.corners))) {
         let s = edges::snap(photo, f.corners, [true; 4]);
-        return Some(Sheet { corners: s.corners, confidence: f.confidence, snapped: s.snapped, scan: false });
+        return Some(beyond_printed(photo, Sheet { corners: s.corners, confidence: f.confidence, snapped: s.snapped, scan: false }));
     }
     let b = lined?;
     // The sides through the outermost lined blocks lie up to half a block
@@ -61,7 +64,54 @@ pub fn find(photo: &Photo) -> Option<Sheet> {
     // than a block inside it: look mostly outward — not inward as far as a
     // margin line printed near the edge.
     let s = edges::snap_within(photo, b.found.corners, [true; 4], edges::reach(photo).max(b.slack), 0.5 * b.slack);
-    Some(Sheet { corners: s.corners, confidence: b.found.confidence, snapped: s.snapped, scan: false })
+    Some(beyond_printed(photo, Sheet { corners: s.corners, confidence: b.found.confidence, snapped: s.snapped, scan: false }))
+}
+
+/// Sides that are lines printed on the paper (a close-up of a notebook: a
+/// row of squares taken for the edge) move out to the frame's border beyond
+/// them — the sheet goes on past the photo there. All four: the sheet fills
+/// the frame.
+fn beyond_printed(photo: &Photo, sheet: Sheet) -> Sheet {
+    let c = sheet.corners;
+    let printed: [bool; 4] = std::array::from_fn(|k| edges::paper_both_sides(photo, c[k], c[(k + 1) % 4]));
+    if !printed.iter().any(|&p| p) {
+        return sheet;
+    }
+    let (w, h) = (photo.w as f64, photo.h as f64);
+    let frame = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+    let whole = Sheet { corners: frame, confidence: sheet.confidence, snapped: [false; 4], scan: false };
+    // The border the side looks out to: top, right, bottom or left.
+    let border = |k: usize| {
+        let n = quad::Line::through(c[k], c[(k + 1) % 4]).normal();
+        if n[0].abs() > n[1].abs() {
+            if n[0] > 0.0 { 1 } else { 3 }
+        } else if n[1] > 0.0 {
+            2
+        } else {
+            0
+        }
+    };
+    let mut lines: Vec<quad::Line> = (0..4).map(|k| quad::Line::through(c[k], c[(k + 1) % 4])).collect();
+    let mut used = [false; 4];
+    for k in (0..4).filter(|&k| printed[k]) {
+        let e = border(k);
+        if used[e] {
+            return whole;
+        }
+        used[e] = true;
+        lines[k] = quad::Line::through(frame[e], frame[(e + 1) % 4]);
+    }
+    let mut q = [[0.0; 2]; 4];
+    for k in 0..4 {
+        match lines[(k + 3) % 4].intersect(&lines[k]) {
+            Some(p) => q[k] = p,
+            None => return whole,
+        }
+    }
+    if !quad::convex_clockwise(&q) || printed.iter().all(|&p| p) {
+        return whole;
+    }
+    Sheet { corners: q, snapped: std::array::from_fn(|k| sheet.snapped[k] && !printed[k]), ..sheet }
 }
 
 #[derive(Serialize, Debug)]
@@ -165,6 +215,12 @@ impl Desk {
     pub fn ruling(&self, warp: &str, w_mm: f64, h_mm: f64) -> Result<String, JsError> {
         let warp: warp::Warp = serde_json::from_str(warp)?;
         Ok(serde_json::to_string(&ruling::detect(&self.photo, &warp, w_mm, h_mm))?)
+    }
+
+    /// How the phone was held, from the photo's straight lines, `focal` px:
+    /// `{ rot, confidence, by, lines }` or `null` (see `perspective::Perspective`).
+    pub fn perspective(&self, focal: f64) -> Result<String, JsError> {
+        Ok(serde_json::to_string(&perspective::find(&self.photo, focal))?)
     }
 
     /// The sheet's edges as curves: `{ corners, bulge, max, fitted }`.

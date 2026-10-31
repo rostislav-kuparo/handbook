@@ -24,6 +24,8 @@ interface Env {
   vars: Map<string, number>;
   scene: Scene;
   ctx?: Ctx;
+  /** Adds an item for the line being run (commands' helpers go through it). */
+  add?: AddItem;
 }
 
 const num = (v: number): Val => ({ k: 'num', v });
@@ -126,6 +128,8 @@ function describe(v: Val): string {
     graph: 'график',
     curve: 'кривая',
     text: 'надпись',
+    region: 'заштрихованная область',
+    hatched: 'линия со штриховкой',
     space: 'фигура в пространстве',
   };
   return names[v.s.type];
@@ -377,6 +381,16 @@ function ctxOf(env: Env): Ctx {
   if (env.ctx) return env.ctx;
   const val = (e: Expr) => evalExpr(e, env);
   const ctx: Ctx = {
+    draw: (shape, look = {}) => {
+      if (!env.add) return;
+      const it = env.add(shape, look.label);
+      if (look.label) {
+        it.showLabel = true;
+        if (shape.type !== 'point') it.caption = look.label;
+      }
+      if (look.thin) it.thickness = 2;
+      if (look.dashed) it.lineStyle = 1;
+    },
     val,
     num: (e) => toNum(val(e)),
     point: (e) => {
@@ -492,6 +506,40 @@ function exec(stmt: Statement, env: Env, add: AddItem) {
 }
 
 function run(code: string): Scene {
+  return runEnv(code).scene;
+}
+
+/**
+ * Numbers of a drawing, for a note's {…}: each expression evaluated after all
+ * its commands, in its units — an angle in degrees, a segment, vector or
+ * circle by its length (radius); null where it is not a number.
+ */
+export function valuesIn(code: string, exprs: string[]): (number | string | null)[] {
+  const { env } = runEnv(code);
+  return exprs.map((text) => {
+    try {
+      const stmt = parseLine(`valueq = ${text}`);
+      if (!stmt || stmt.kind !== 'define') return null;
+      const v = evalExpr(stmt.expr, env);
+      if (v.k === 'num') return Number.isFinite(v.v) ? v.v : null;
+      if (v.k === 'str') return v.v;
+      if (v.k !== 'shape') return null;
+      const s = v.s;
+      if (s.type === 'angle') return (Math.abs(s.sweep) * 180) / Math.PI;
+      if (s.type === 'segment' || s.type === 'vector') return Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y);
+      if (s.type === 'circle') return s.r;
+      if (s.type === 'space' && s.pts.length === 2) {
+        const [p, q] = s.pts;
+        return Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+function runEnv(code: string): { scene: Scene; env: Env } {
   const scene: Scene = { items: [], view: {}, errors: [] };
   const env: Env = { scope: new Map(), vars: new Map(), scene };
   const lines: { line: number; text: string; stmt: Statement }[] = [];
@@ -526,6 +574,7 @@ function run(code: string): Scene {
       return item;
     };
     try {
+      env.add = add;
       exec(l.stmt, env, add);
     } catch (err) {
       scene.errors.push({ line: l.line, message: (err as Error).message });
@@ -534,7 +583,7 @@ function run(code: string): Scene {
   scene.errors.sort((a, b) => a.line - b.line);
   // Figures in space are drawn as an epure: their projections, linking lines, the axis.
   projectSpace(scene);
-  return scene;
+  return { scene, env };
 }
 
 const cache = new Map<string, Scene>();

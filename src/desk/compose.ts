@@ -5,7 +5,10 @@
 // takes what the photo measured of itself: its blur (per side of the sheet),
 // the phone's sharpening, its grain, the glare, the paper's fibres — and
 // behaves like the chosen pen.
+import type { PrinterLook } from '../blank/printer';
+import { MM } from '../editor/page';
 import { PAPER } from '../editor/exporters';
+import { MAX_SHIFT } from '../wear/relief';
 import type { ObjectMask, Specular } from './analysis';
 import type { Mat3 } from './homography';
 import type { Photo } from './photo';
@@ -64,6 +67,25 @@ export interface Placement {
 }
 
 const PEN_CODE: Record<PenKind, number> = { ballpoint: 0, gel: 1, pencil: 2 };
+/** The printer's toner: drawn by the same pass as the ink, before it. */
+const TONER = 3;
+/** Graphite rubbed onto the sheet (the traces of work): pencil on the fibres, no strokes under it. */
+const RUB = 4;
+
+/** What the result shows, up to which stage of the render (each includes those before it). */
+export type Stage = 'photo' | 'folds' | 'print' | 'drawings' | 'text' | 'all';
+export const STAGES: { id: Stage; name: string; hint: string }[] = [
+  { id: 'photo', name: 'Фото', hint: 'исходный снимок, ничего не нарисовано' },
+  { id: 'folds', name: 'Складки', hint: 'снимок со складками бумаги' },
+  { id: 'print', name: 'Печать', hint: 'со складками и печатью бланка' },
+  { id: 'drawings', name: 'Чертежи', hint: 'и чертежи, без текста' },
+  { id: 'text', name: 'Текст', hint: 'и текст, без следов работы' },
+  { id: 'all', name: 'Всё', hint: 'со следами работы — готовый снимок' },
+];
+const stageAt = (s: Stage) => STAGES.findIndex((x) => x.id === s);
+
+/** A printer that prints exactly what it is given (until one is chosen). */
+const PERFECT: PrinterLook = { tone: [0.04, 0.04, 0.04], gain: 0, bands: [], banding: [0, 1], blotch: 0, fade: 0, grain: 0, specks: 0, ghost: [0, 80], rag: 0, seed: 0 };
 
 const COMMON = /* glsl */ `
 vec3 toLinear(vec3 c) {
@@ -123,23 +145,83 @@ uniform float uDensity;
 uniform int uPenKind;
 uniform float uTexture;
 uniform float uFibreLod;
+uniform sampler2D uShift;
+uniform bool uHasShift;
+uniform vec2 uShiftScale;
+// The printer (see blank/printer.ts): tone, softening (mm), streaks, banding, blotches, fade, grain, specks, ghost, rag.
+uniform vec3 uTone;
+uniform float uGain;
+uniform vec3 uBands[3];
+uniform int uBandCount;
+uniform vec2 uBanding;
+uniform float uBlotch;
+uniform float uFade;
+uniform float uGrainT;
+uniform float uSpecks;
+uniform vec2 uGhost;
+uniform float uRag;
+uniform float uSeed;
 in vec2 vUv;
 out vec4 outColor;
 ${COMMON}
+float densityAt(vec2 mm, float wMm) {
+  float u = mm.x / wMm;
+  float d = 1.0;
+  for (int i = 0; i < 3; i++) {
+    if (i >= uBandCount) break;
+    vec3 b = uBands[i];
+    d -= b.z * exp(-pow((u - b.x) / b.y, 2.0));
+  }
+  d += uBanding.x * sin(6.2831853 * mm.y / uBanding.y);
+  d += uBlotch * (vnoise(mm / 40.0 + uSeed) * 2.0 - 1.0);
+  d -= abs(uFade) * (uFade > 0.0 ? u : 1.0 - u);
+  return clamp(d, 0.3, 1.2);
+}
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y);
   vec2 uv = vUv;
+  // The sheet's creases move what lies on it; a ridge takes less ink.
+  float relief = 0.0;
+  if (uHasShift) {
+    vec3 sh = texture(uShift, vUv).rgb;
+    uv += (sh.rg - 0.5) * uShiftScale;
+    relief = (sh.b - 0.5) * 2.0;
+  }
   // Mipmaps and anisotropic filtering pick the right detail for the far edge of the sheet.
   vec4 ink = texture(uInk, uv);
   vec4 pen = texture(uPen, uv);
   float soft = texture(uInk, uv, 1.5).a;
   bool inside = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
   float a = inside ? ink.a : 0.0;
+  vec3 color = ink.rgb / max(ink.a, 1e-4);
+  if (uPenKind == 3 && inside) {
+    // The printer: softened edges (thin lines thicker), uneven density, grain, specks, a ghost.
+    vec2 mm = uv * uInkSize / ${MM.toFixed(6)};
+    float perMm = float(textureSize(uInk, 0).x) / (uInkSize.x / ${MM.toFixed(6)});
+    float aS = uGain > 0.0 ? textureLod(uInk, uv, max(0.0, log2(uGain * perMm))).a : a;
+    float n = vnoise(mm / 0.04 + uSeed);
+    float c = a;
+    if (uGain > 0.0) c = clamp(mix(a, smoothstep(0.12 + uRag * (n - 0.5) * 4.0, 0.72, aS), 0.65), 0.0, 1.0);
+    c *= densityAt(mm, uInkSize.x / ${MM.toFixed(6)}) * (1.0 + uGrainT * (vnoise(mm / 0.08 + uSeed + 11.0) * 2.0 - 1.0) * 0.5);
+    if (uGhost.x > 0.0) {
+      vec2 gv = uv - vec2(0.0, uGhost.y * ${MM.toFixed(6)} / uInkSize.y);
+      if (gv.y >= 0.0) c = max(c, texture(uInk, gv).a * uGhost.x);
+    }
+    // Specks of toner on the white, more near the printing.
+    if (uSpecks > 0.0) {
+      vec2 cell = floor(mm / 0.15);
+      float near = textureLod(uInk, uv, max(0.0, log2(3.0 * perMm))).a;
+      float h = hash(cell + uSeed * 13.0);
+      float chance = uSpecks * 0.000225 * (1.0 + 8.0 * near);
+      if (h > 1.0 - chance) c = max(c, 0.6 * smoothstep(0.5, 0.2, length(fract(mm / 0.15) - 0.5)));
+    }
+    if (a < 0.004) color = vec3(0.0);
+    a = min(c, 1.0);
+  }
   if (a <= 0.0) {
     outColor = vec4(1.0);
     return;
   }
-  vec3 color = ink.rgb / max(ink.a, 1e-4);
 
   // The pen here: pressure (1 at the letter's median) and the stroke's direction; none in drawings.
   float has = smoothstep(0.2, 0.6, pen.a);
@@ -158,9 +240,18 @@ void main() {
   float hp = clamp(lum(texelFetch(uPhoto, ivec2(p), 0).rgb) / max(around, 1e-4), 0.8, 1.25);
 
   vec3 base = clamp(toLinear(color) / uPaper, 1e-4, 1.0);
-  if (uCalib.x >= 0.0 && distance(color, uDocInk) < 0.06) base = pow(clamp(uCalib, 1e-4, 1.0), vec3(1.0 / 0.35));
+  if (uPenKind != 3 && uCalib.x >= 0.0 && distance(color, uDocInk) < 0.06) base = pow(clamp(uCalib, 1e-4, 1.0), vec3(1.0 / 0.35));
   float d = uDensity;
-  if (uPenKind == 0) {
+  if (uPenKind != 3 && uPenKind != 4) d *= 1.0 - 0.3 * clamp(relief, -1.0, 1.0);
+  if (uPenKind == 3) {
+    // Toner: fused on top of the fibres, matte; its black still sends back some of the light.
+    base = mix(uTone, vec3(1.0), toLinear(color));
+    d *= pow(hp, 0.2 * uTexture);
+  } else if (uPenKind == 4) {
+    // Graphite rubbed off by the hand: on the fibres' tops.
+    base = vec3(0.10, 0.10, 0.11);
+    d *= pow(hp, 2.0 * uTexture);
+  } else if (uPenKind == 0) {
     // Ballpoint: thinner where pressed lightly, ink on the fibres' tops, and
     // streaks along the stroke where the ball runs dry (more under light pressure).
     d *= 0.7 + 0.3 * pn;
@@ -181,6 +272,18 @@ void main() {
     d *= 0.55 + 0.9 * vnoise(P / 0.8 + 3.0);
   }
   outColor = vec4(mix(vec3(1.0), pow(base, vec3(max(d, 0.0))), a), 1.0);
+}`;
+
+/** The light on the sheet's relief (grey, 0.5 = as photographed), laid over the photo by the page's mesh. */
+const SHADE = /* glsl */ `#version 300 es
+precision highp float;
+uniform sampler2D uShadeTex;
+in vec2 vUv;
+out vec4 outColor;
+void main() {
+  bool inside = all(greaterThanEqual(vUv, vec2(0.0))) && all(lessThanEqual(vUv, vec2(1.0)));
+  float s = inside ? texture(uShadeTex, vUv).r : 0.5;
+  outColor = vec4(s, s, s, 1.0);
 }`;
 
 /** One direction of a Gaussian blur; sigma from the sides of the sheet unless fixed. */
@@ -227,6 +330,12 @@ uniform sampler2D uSoft;
 uniform sampler2D uSpec;
 uniform sampler2D uMask;
 uniform bool uHasMask;
+uniform sampler2D uShadeT;
+uniform bool uHasShade;
+uniform sampler2D uTL;
+uniform sampler2D uShadeL;
+uniform bool uHasShadeL;
+uniform int uLeft;
 uniform vec2 uSize;
 uniform float uSplit;
 uniform float uSharpen;
@@ -250,16 +359,21 @@ void main() {
   ivec2 f = ivec2(gl_FragCoord.xy);
   ivec2 p = ivec2(f.x, int(uSize.y) - 1 - f.y);
   vec3 photo = texelFetch(uPhoto, p, 0).rgb;
-  if (float(p.x) + 0.5 < uSplit) {
+  // Left of the shutter: the photo itself, or an earlier stage of the render.
+  bool left = float(p.x) + 0.5 < uSplit;
+  if (left && uLeft == 0) {
     outColor = vec4(toSrgb(photo), 1.0);
     return;
   }
-  vec3 T = texelFetch(uT, f, 0).rgb;
-  if (uSharpen > 0.0) T = clamp(T + uSharpen * (T - texelFetch(uSoft, f, 0).rgb), 0.0, 1.0);
-  // Nothing is written over things lying on the sheet.
-  if (uHasMask) T = mix(vec3(1.0), T, texture(uMask, (vec2(p) + 0.5) / uSize).r);
+  vec3 T = left ? texelFetch(uTL, f, 0).rgb : texelFetch(uT, f, 0).rgb;
+  if (uSharpen > 0.0 && !left) T = clamp(T + uSharpen * (T - texelFetch(uSoft, f, 0).rgb), 0.0, 1.0);
+  // Nothing is written over things lying on the sheet, nor are they creased.
+  float free = uHasMask ? texture(uMask, (vec2(p) + 0.5) / uSize).r : 1.0;
+  T = mix(vec3(1.0), T, free);
   vec3 S = uHasSpec ? min(texture(uSpec, (vec2(p) + 0.5) / uSize).rgb, photo) : vec3(0.0);
   vec3 lin = (photo - S) * T + S;
+  bool shaded = left ? uHasShadeL : uHasShade;
+  if (shaded) lin *= mix(1.0, 2.0 * (left ? texelFetch(uShadeL, f, 0).r : texelFetch(uShadeT, f, 0).r), free);
   if (uGrain > 0.0 && min(T.r, min(T.g, T.b)) < 0.999) {
     // What darker ink would have in grain, minus what is left of the photo's own.
     vec3 v = uNoiseA * photo * T * (1.0 - T) + uNoiseB * (1.0 - T * T);
@@ -306,6 +420,18 @@ export class DeskRenderer {
   private photo: WebGLTexture | null = null;
   private ink: WebGLTexture | null = null;
   private pen: WebGLTexture | null = null;
+  /** The blank's toner on the same page, or null: nothing printed. */
+  private toner: WebGLTexture | null = null;
+  /** Under the toner: no pen strokes. */
+  private noPen: WebGLTexture | null = null;
+  /** The drawings of the page and the graphite rubbed onto it, apart from the text (each can be left out). */
+  private drawings: WebGLTexture | null = null;
+  private wear: WebGLTexture | null = null;
+  /** The sheet's relief: how it moves what lies on it, and the light on it; null: flat. */
+  private shift: WebGLTexture | null = null;
+  private shade: WebGLTexture | null = null;
+  private printer: PrinterLook = PERFECT;
+  private readonly shadeProg: Program;
   private spec: WebGLTexture | null = null;
   private specOf: Specular | null = null;
   private mask: WebGLTexture | null = null;
@@ -329,6 +455,7 @@ export class DeskRenderer {
     this.floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     this.aniso = gl.getExtension('EXT_texture_filter_anisotropic');
     this.warp = this.program(WARP, MESH_VERTEX);
+    this.shadeProg = this.program(SHADE, MESH_VERTEX);
     this.blur = this.program(BLUR);
     this.final = this.program(FINAL);
     // One triangle covering the whole viewport, for the passes over every pixel.
@@ -432,6 +559,56 @@ export class DeskRenderer {
     this.meshCount = place.indices.length;
   }
 
+  /** The page's drawings and the rubbed graphite (the same page as the ink), each or none. */
+  setLayers(drawings: HTMLCanvasElement | null, wear: HTMLCanvasElement | null) {
+    const gl = this.gl;
+    if (this.drawings) gl.deleteTexture(this.drawings);
+    if (this.wear) gl.deleteTexture(this.wear);
+    this.drawings = drawings && this.upload(null, drawings);
+    this.wear = wear && this.upload(null, wear);
+    this.ensureNoPen();
+  }
+
+  /** The sheet's relief (wear/relief.ts) on the same page, or null: a flat sheet. */
+  setRelief(relief: { shift: HTMLCanvasElement; shade: HTMLCanvasElement; flat: boolean } | null) {
+    const gl = this.gl;
+    if (this.shift) gl.deleteTexture(this.shift);
+    if (this.shade) gl.deleteTexture(this.shade);
+    this.shift = null;
+    this.shade = null;
+    if (!relief || relief.flat) return;
+    this.shift = this.upload(null, relief.shift);
+    this.shade = this.upload(null, relief.shade);
+  }
+
+  /** How the printer prints the blank (blank/printer.ts). */
+  setPrinter(look: PrinterLook | null) {
+    this.printer = look ?? PERFECT;
+  }
+
+  private ensureNoPen() {
+    const gl = this.gl;
+    if (!this.noPen) {
+      this.noPen = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this.noPen);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+      this.params(gl.NEAREST, gl.NEAREST);
+    }
+  }
+
+  /** The blank printed on this page (the same size and place as the ink), or none. */
+  setToner(toner: HTMLCanvasElement | null) {
+    const gl = this.gl;
+    if (this.toner) gl.deleteTexture(this.toner);
+    this.toner = toner && this.upload(null, toner);
+    if (!this.noPen) {
+      this.noPen = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this.noPen);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+      this.params(gl.NEAREST, gl.NEAREST);
+    }
+  }
+
   private params(min: number, mag: number) {
     const gl = this.gl;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, min);
@@ -499,74 +676,154 @@ export class DeskRenderer {
     gl.bindVertexArray(null);
   }
 
-  /** The warp pass: bare paper (T = 1) everywhere, then the page's mesh over it. */
-  private drawMesh(target: Target, textures: [string, WebGLTexture][], set: () => void) {
+  /**
+   * The warp pass: bare paper (T = 1) everywhere, then the page's mesh over it;
+   * `over`: onto what is there, multiplying (ink over the toner).
+   */
+  private drawMesh(target: Target, textures: [string, WebGLTexture][], set: () => void, over = false, prog = this.warp, clear = 1) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
     gl.viewport(0, 0, this.width, this.height);
-    gl.clearColor(1, 1, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(this.warp.prog);
+    if (over) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.DST_COLOR, gl.ZERO);
+    } else {
+      gl.clearColor(clear, clear, clear, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.useProgram(prog.prog);
     textures.forEach(([name, tex], unit) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.uniform1i(this.warp.loc(name), unit);
+      gl.uniform1i(prog.loc(name), unit);
     });
     set();
     gl.bindVertexArray(this.meshVao);
     gl.drawElements(gl.TRIANGLES, this.meshCount, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
   }
 
-  render(look: InkLook, ph: PhotoLook, docInk: string) {
+  /** The page's layers through the warp pass into `out` (and blurred, through `tmp`), up to `stage`. */
+  private transmittance(out: Target, tmp: Target, stage: Stage, look: InkLook, ph: PhotoLook, docInk: string, toner: number) {
+    const gl = this.gl;
+    const place = this.place!;
+    const at = stageAt(stage);
+    const paper = hexLinear(PAPER);
+    const pr = this.printer;
+    const shift = at >= stageAt('folds') ? this.shift : null;
+    // The toner first, then the drawings, the text and the rubbed graphite over it: transmittances multiply.
+    const layers: [WebGLTexture, WebGLTexture, number, number][] = [];
+    if (at >= stageAt('print') && this.toner && this.noPen) layers.push([this.toner, this.noPen, TONER, toner]);
+    if (at >= stageAt('drawings') && this.drawings && this.noPen) layers.push([this.drawings, this.noPen, PEN_CODE[look.pen], look.density]);
+    if (at >= stageAt('text')) layers.push([this.ink!, this.pen!, PEN_CODE[look.pen], look.density]);
+    if (at >= stageAt('all') && this.wear && this.noPen) layers.push([this.wear, this.noPen, RUB, 0.6]);
+    if (!layers.length) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.clearColor(1, 1, 1, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return;
+    }
+    layers.forEach(([ink, pen, kind, density], i) =>
+      this.drawMesh(
+        out,
+        [
+          ['uInk', ink],
+          ['uPen', pen],
+          ['uPhoto', this.photo!],
+          ['uShift', shift ?? ink],
+        ],
+        () => {
+          const u = (n: string) => this.warp.loc(n);
+          gl.uniform2f(u('uInkSize'), ...place.inkSize);
+          gl.uniform2f(u('uSize'), this.width, this.height);
+          gl.uniform3f(u('uPaper'), ...paper);
+          gl.uniform3f(u('uDocInk'), ...hexSrgb(docInk));
+          gl.uniform3f(u('uCalib'), ...((ph.calib ?? [-1, -1, -1]) as [number, number, number]));
+          gl.uniform1f(u('uDensity'), density);
+          gl.uniform1i(u('uPenKind'), kind);
+          gl.uniform1f(u('uTexture'), look.texture);
+          gl.uniform1f(u('uFibreLod'), place.fibreLod);
+          gl.uniform1i(u('uHasShift'), shift ? 1 : 0);
+          gl.uniform2f(u('uShiftScale'), (2 * MAX_SHIFT * MM) / place.inkSize[0], (2 * MAX_SHIFT * MM) / place.inkSize[1]);
+          gl.uniform3f(u('uTone'), ...pr.tone);
+          gl.uniform1f(u('uGain'), pr.gain);
+          const bands = [0, 1, 2].flatMap((k) => pr.bands[k] ?? [0.5, 1, 0]);
+          gl.uniform3fv(u('uBands'), new Float32Array(bands));
+          gl.uniform1i(u('uBandCount'), Math.min(3, pr.bands.length));
+          gl.uniform2f(u('uBanding'), pr.banding[0], pr.banding[1]);
+          gl.uniform1f(u('uBlotch'), pr.blotch);
+          gl.uniform1f(u('uFade'), pr.fade);
+          gl.uniform1f(u('uGrainT'), pr.grain);
+          gl.uniform1f(u('uSpecks'), pr.specks);
+          gl.uniform2f(u('uGhost'), pr.ghost[0], pr.ghost[1]);
+          gl.uniform1f(u('uRag'), pr.rag);
+          gl.uniform1f(u('uSeed'), pr.seed % 997);
+        },
+        i > 0,
+      ),
+    );
+    if (look.blur >= 0.15) {
+      this.blurPass(out, tmp, [1, 0], 0, look, ph);
+      this.blurPass(tmp, out, [0, 1], 0, look, ph);
+    }
+  }
+
+  private blurPass(src: Target, dst: Target, dir: [number, number], fixed: number, look: InkLook, ph: PhotoLook) {
+    const gl = this.gl;
+    const place = this.place!;
+    this.pass(this.blur, dst.fb, [['uSrc', src.tex]], () => {
+      const u = (n: string) => this.blur.loc(n);
+      gl.uniform2i(u('uDir'), ...dir);
+      gl.uniform1f(u('uFixed'), fixed);
+      gl.uniform4f(u('uSides'), ...(ph.sides.map((k) => k * look.blur) as [number, number, number, number]));
+      gl.uniformMatrix3fv(u('uToPaper'), false, columns(place.toPaper));
+      gl.uniform1f(u('uHeight'), this.height);
+    });
+  }
+
+  /** The light of the sheet's relief over the photo into `out`, or false when the stage has none. */
+  private shadeInto(out: Target, stage: Stage): boolean {
+    if (!this.shade || stageAt(stage) < stageAt('folds')) return false;
+    this.drawMesh(out, [['uShadeTex', this.shade]], () => {}, false, this.shadeProg, 0.5);
+    return true;
+  }
+
+  private extra(i: number): Target {
+    while (this.targets.length <= i) this.targets.push(this.target());
+    return this.targets[i];
+  }
+
+  /**
+   * `toner`: how thick the blank's toner lies (when one is printed on this page);
+   * `stage`: what is shown — the render up to that stage; `left`: what the shutter shows on its left.
+   */
+  render(look: InkLook, ph: PhotoLook, docInk: string, toner = 1, stage: Stage = 'all', left: Stage = 'photo') {
     const gl = this.gl;
     const place = this.place;
     if (!this.photo || !this.ink || !this.pen || !place) return;
     const [a, b] = this.targets;
-    const paper = hexLinear(PAPER);
     const spec = this.glare(ph.specular);
-
-    this.drawMesh(
-      a,
-      [
-        ['uInk', this.ink],
-        ['uPen', this.pen],
-        ['uPhoto', this.photo],
-      ],
-      () => {
-        const u = (n: string) => this.warp.loc(n);
-        gl.uniform2f(u('uInkSize'), ...place.inkSize);
-        gl.uniform2f(u('uSize'), this.width, this.height);
-        gl.uniform3f(u('uPaper'), ...paper);
-        gl.uniform3f(u('uDocInk'), ...hexSrgb(docInk));
-        gl.uniform3f(u('uCalib'), ...((ph.calib ?? [-1, -1, -1]) as [number, number, number]));
-        gl.uniform1f(u('uDensity'), look.density);
-        gl.uniform1i(u('uPenKind'), PEN_CODE[look.pen]);
-        gl.uniform1f(u('uTexture'), look.texture);
-        gl.uniform1f(u('uFibreLod'), place.fibreLod);
-      },
-    );
-
-    const blurPass = (src: Target, dst: Target, dir: [number, number], fixed: number) =>
-      this.pass(this.blur, dst.fb, [['uSrc', src.tex]], () => {
-        const u = (n: string) => this.blur.loc(n);
-        gl.uniform2i(u('uDir'), ...dir);
-        gl.uniform1f(u('uFixed'), fixed);
-        gl.uniform4f(u('uSides'), ...(ph.sides.map((k) => k * look.blur) as [number, number, number, number]));
-        gl.uniformMatrix3fv(u('uToPaper'), false, columns(place.toPaper));
-        gl.uniform1f(u('uHeight'), this.height);
-      });
-    if (look.blur >= 0.15) {
-      blurPass(a, b, [1, 0], 0);
-      blurPass(b, a, [0, 1], 0);
-    }
+    this.transmittance(a, b, stage, look, ph, docInk, toner);
     // The phone's sharpening: a softer copy to subtract.
     const sharpen = ph.sharpen >= 0.05;
+    const soft = sharpen ? this.extra(2) : a;
     if (sharpen) {
-      if (this.targets.length < 3) this.targets.push(this.target());
-      const c = this.targets[2];
-      blurPass(a, b, [1, 0], SHARPEN_RADIUS);
-      blurPass(b, c, [0, 1], SHARPEN_RADIUS);
+      this.blurPass(a, b, [1, 0], SHARPEN_RADIUS, look, ph);
+      this.blurPass(b, soft, [0, 1], SHARPEN_RADIUS, look, ph);
+    }
+    // Photo-sized buffers only when there is something to put in them (they take a lot of the GPU's memory).
+    const shadeT = this.shade ? this.extra(3) : a;
+    const shaded = this.shadeInto(shadeT, stage);
+    // The left of the shutter, when it shows a stage of the render rather than the photo.
+    const split = look.split > 0 && left !== 'photo';
+    const tl = split ? this.extra(4) : a;
+    const shadeL = split && this.shade ? this.extra(5) : a;
+    let shadedL = false;
+    if (split) {
+      this.transmittance(tl, b, left, look, ph, docInk, toner);
+      shadedL = this.shadeInto(shadeL, left);
     }
 
     this.pass(
@@ -575,9 +832,12 @@ export class DeskRenderer {
       [
         ['uPhoto', this.photo],
         ['uT', a.tex],
-        ['uSoft', sharpen ? this.targets[2].tex : a.tex],
+        ['uSoft', sharpen ? soft.tex : a.tex],
         ['uSpec', spec ?? a.tex],
         ['uMask', this.mask ?? a.tex],
+        ['uShadeT', shadeT.tex],
+        ['uTL', tl.tex],
+        ['uShadeL', shadeL.tex],
       ],
       () => {
         const u = (n: string) => this.final.loc(n);
@@ -587,6 +847,9 @@ export class DeskRenderer {
         gl.uniform1f(u('uSharpen'), sharpen ? ph.sharpen : 0);
         gl.uniform1i(u('uHasSpec'), spec ? 1 : 0);
         gl.uniform1i(u('uHasMask'), this.mask ? 1 : 0);
+        gl.uniform1i(u('uHasShade'), shaded ? 1 : 0);
+        gl.uniform1i(u('uHasShadeL'), shadedL ? 1 : 0);
+        gl.uniform1i(u('uLeft'), split ? 1 : 0);
         gl.uniform3f(u('uNoiseA'), n.a[0], n.a[1], n.a[2]);
         gl.uniform3f(u('uNoiseB'), n.b[0], n.b[1], n.b[2]);
         gl.uniform1f(u('uRho'), Math.min(1, Math.max(0, n.rho)));

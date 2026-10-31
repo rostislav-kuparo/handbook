@@ -1,3 +1,4 @@
+import { exportBlanks, importBlanks } from '../blank/blank';
 import { exportDesks, importDesks } from '../desk/desks';
 import { showDocument } from '../editor/docState';
 import { createDocument, exportEverything, exportHandwriting, getSetting, importEverything, importHandwriting } from '../storage/db';
@@ -20,6 +21,7 @@ export async function openJson() {
     if (data?.format === 'handbook-backup') {
       const n = await importEverything(data);
       const desks = Array.isArray(data.desks) ? await importDesks(data.desks) : 0;
+      if (Array.isArray(data.blanks)) await importBlanks(data.blanks);
       alert(`Загружено из резервной копии: документов — ${n.documents}, вариантов букв — ${n.samples}${desks ? `, столов — ${desks}` : ''}.`);
       return;
     }
@@ -38,7 +40,7 @@ export async function openJson() {
 /** Handwriting, every document and the settings in one file. */
 export async function backupEverything() {
   const withDesks = await getSetting(BACKUP_DESKS_KEY, false);
-  const data = await exportEverything(withDesks ? await exportDesks() : undefined);
+  const data = await exportEverything(withDesks ? await exportDesks() : undefined, await exportBlanks());
   const day = new Date().toISOString().slice(0, 10);
   await saveFile(new Blob([JSON.stringify(data)], { type: 'application/json' }), `handbook-backup-${day}.json`);
 }

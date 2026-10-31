@@ -2,12 +2,14 @@
 // view and the exported sheets.
 import type { DrawPen } from '../editor/page';
 import type { Deal } from '../engine/client';
+import { isRomanChar, romanSvg } from '../blank/roman';
 import { FALLBACK_FONTS } from '../engine/constants';
+import { getHandwriting } from '../engine/handwriting';
 import type { Style } from '../model/types';
 import { compileSketch } from './evaluate';
 import { formulaOf, layoutFormula } from './formula';
 import { labelInk, type LabelInk } from './labels';
-import { layoutSketch, placeLabels, sketchHeight, sketchScale, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
+import { blankBoxOf, layoutSketch, placeLabels, sketchHeight, sketchScale, type Around, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
 import type { Pen } from './pen';
 
 export interface Drawing {
@@ -33,7 +35,17 @@ export function penFor(style: Style, fontSize: number, draw?: Partial<DrawPen>):
   const width = (pencil ? Math.max(0.7, base * 0.72) : base) * (draw?.weight ?? 1);
   const pressure = (pencil ? Math.min(1, style.pressure + 0.3) : style.pressure) * (draw?.pressure ?? 1);
   const jitter = pencil ? Math.min(1, style.jitter * 1.2 + 0.15) : style.jitter;
-  return { width: Math.max(0.4, width), pressure: Math.min(pressure, 1.6), jitter, wobble: draw?.wobble ?? 1, overshoot: draw?.overshoot ?? 1 };
+  return {
+    width: Math.max(0.4, width),
+    pressure: Math.min(pressure, 1.6),
+    jitter,
+    wobble: draw?.wobble ?? 1,
+    overshoot: draw?.overshoot ?? 1,
+    points: draw?.points ?? 1,
+    joins: draw?.joins ?? 1,
+    // Away from a blank only a pencil drawing is drawn with compasses.
+    compass: (draw?.compass ?? true) && pencil,
+  };
 }
 
 /**
@@ -52,7 +64,7 @@ const layouts = new Map<string, SketchLayout>();
 
 /** Lines and label places of a drawing `width` px wide (cached). */
 export function sketchLayout(code: string, width: number, fontSize: number, pen: Pen): SketchLayout {
-  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${code}`;
+  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${pen.points ?? 1}|${pen.joins ?? 1}|${pen.compass ? 1 : 0}|${code}`;
   const hit = layouts.get(key);
   if (hit) return hit;
   const tex = formulaOf(code);
@@ -74,6 +86,14 @@ export function scaleOf(code: string, width: number, fontSize: number) {
   // A formula has no units to lay onto squares.
   if (formulaOf(code) !== null) return { height: heightOf(code, width, fontSize), plotW: width, ox: 0, oy: 0, ppx: 0, ppy: 0 };
   return sketchScale(compileSketch(code), width, fontSize);
+}
+
+/**
+ * Where a drawing on a blank (НаБланке) lies on the sheet: its box, sheet px,
+ * and the origin's place; null for any other drawing (and a formula).
+ */
+export function blankBox(code: string) {
+  return formulaOf(code) !== null ? null : blankBoxOf(compileSketch(code));
 }
 
 /** Mistakes in a drawing's code (none in a formula: it is written as it can be). */
@@ -101,9 +121,29 @@ async function writeLabels(layout: SketchLayout, deal: Deal): Promise<{ inks: La
 }
 
 /** The whole drawing, labels written by the handwriting engine, going on from `deal`. */
-export async function drawSketch(layout: SketchLayout, deal: Deal = {}): Promise<Drawing> {
+export async function drawSketch(layout: SketchLayout, deal: Deal = {}, around?: Around): Promise<Drawing> {
   const { inks } = await writeLabels(layout, deal);
-  return { ...linesOnly(layout), labels: placeLabels(layout, inks) };
+  return { ...linesOnly(layout), labels: placeLabels(layout, inks, around) };
+}
+
+type SheetBox = { x: number; y: number; w: number; h: number };
+
+/** The map of a blank's sheet as a drawing on it reads it (see `Occupancy`). */
+export interface SheetMap {
+  version: number;
+  count(box: SheetBox, self?: string): number;
+  covered(box: SheetBox, self?: string): number;
+}
+
+/**
+ * For a drawing on a blank: what lies under a box of it (its own px) on the
+ * sheet, from the sheet's map — its own lines and labels not counted.
+ */
+export function aroundOnSheet(code: string, map: SheetMap | null | undefined): Around | undefined {
+  const box = map ? blankBox(code) : null;
+  if (!box || !map) return undefined;
+  const onSheet = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x: b.x0 + box.x, y: b.y0 + box.y, w: b.x1 - b.x0, h: b.y1 - b.y0 });
+  return { hits: (b) => map.count(onSheet(b), code), covered: (b) => map.covered(onSheet(b), code) };
 }
 
 /**
@@ -135,8 +175,13 @@ export function drawingBody(d: Drawing, ink?: string, draw?: DrawPen): string {
   for (const p of d.paths) out.push(`<path d="${p.d}" ${fill(p.color ?? lineColor)}${p.opacity !== undefined ? ` opacity="${p.opacity}"` : ''}/>`);
   if (pencil && draw?.labelsInPen) out.push('</g>');
   for (const l of d.labels) {
+    const weight = getHandwriting().style.weight;
     const texts = l.ink.fallback
-      .map((f) => `<text x="${f.x}" y="${f.y}" font-size="${1000 * f.scale}" font-family='${FALLBACK_FONTS}' opacity="0.7">${esc(f.ch)}</text>`)
+      .map((f, i) =>
+        isRomanChar(f.ch)
+          ? romanSvg(f, ink ? (l.color ?? labelColor ?? ink) : l.color ? `color-mix(in srgb, ${l.color} var(--pen-mix, 100%), #e6ecff)` : labelColor ?? null, weight, Math.round(l.x * 31 + l.y * 17 + i))
+          : `<text x="${f.x}" y="${f.y}" font-size="${1000 * f.scale}" font-family='${FALLBACK_FONTS}' opacity="0.7">${esc(f.ch)}</text>`,
+      )
       .join('');
     out.push(
       `<g transform="translate(${l.x.toFixed(1)} ${l.y.toFixed(1)}) scale(${l.scale.toFixed(5)})" ${fill(l.color ?? labelColor)}>` +

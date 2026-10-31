@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { openHelp } from '../shell/HelpDialogs';
 import { DrawPenPicker } from '../sketch/DrawPenPicker';
 import { DrawingIcon } from '../ui/icons';
+import { DefaultsRow } from './DefaultsRow';
 import type { PageSetup } from './page';
 import { countSketchFences } from './sketchFences';
 
@@ -62,6 +63,7 @@ export function SketchMenu({ editor, ink, setup, onChange }: Props) {
         <div className="sketch-menu-pen">
           <span className="menu-label">Линии чертежей</span>
           <DrawPenPicker value={setup.drawPen} textInk={setup.ink} onChange={(drawPen) => onChange({ ...setup, drawPen })} />
+          <DefaultsRow part={{ drawPen: setup.drawPen }} what="линии и точки чертежей" />
         </div>
       </div>
     </details>

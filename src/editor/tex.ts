@@ -60,9 +60,15 @@ const SPACES: Record<string, string> = { ',': ' ', ';': ' ', ':': ' ', '>': ' ',
 /** One argument, read literally (\text{…}) or as math (\mathrm{…}, \vec{…}). */
 const LITERAL_ARG = new Set(['text', 'textrm', 'textit', 'textbf', 'textup', 'mbox', 'operatorname']);
 const MATH_ARG = new Set([
-  'mathrm', 'mathit', 'mathbf', 'mathsf', 'mathtt', 'mathcal', 'mathfrak', 'boldsymbol', 'bm',
-  'vec', 'overrightarrow', 'overline', 'underline', 'bar', 'hat', 'widehat', 'tilde', 'widetilde', 'dot', 'ddot',
+  'mathrm', 'mathit', 'mathbf', 'mathsf', 'mathtt', 'mathcal', 'mathfrak', 'boldsymbol', 'bm', 'underline',
 ]);
+/** Marks over the argument: combining characters the handwriting draws above the letter (x̄, a⃗). */
+const ACCENTS: Record<string, string> = {
+  vec: '⃗', overrightarrow: '⃗', overleftarrow: '⃖', overleftrightarrow: '⃡',
+  bar: '̄', overline: '̅', hat: '̂', widehat: '̂', check: '̌', tilde: '̃',
+  widetilde: '̃', dot: '̇', ddot: '̈', acute: '́', grave: '̀', breve: '̆', mathring: '̊',
+};
+const OVERLINE = '̅';
 const BLACKBOARD: Record<string, string> = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ' };
 const NEGATED: Record<string, string> = { '=': '≠', in: '∉', subset: '⊄', equiv: '≢', parallel: '∦' };
 
@@ -173,6 +179,8 @@ class TexReader {
           put(this.arg());
         } else if (MATH_ARG.has(name)) {
           putRuns(convertTex(this.arg(), script));
+        } else if (name in ACCENTS) {
+          putRuns(accented(convertTex(this.arg(), script), ACCENTS[name]));
         } else if (/^x(?:left|right|leftright|Left|Right|Leftright)arrow$/.test(name)) {
           // \xrightarrow[below]{above} on one line: the arrow, then its labels as indices.
           const below = this.option();
@@ -239,6 +247,22 @@ function wrapped(runs: MathRun[], script?: ScriptKind): MathRun[] {
   const text = runs.map((r) => r.text).join('').trim();
   if ([...text].length <= 1 || /^[\p{L}\p{N}.,]+$/u.test(text) || /^\(.*\)$/.test(text)) return runs;
   return [{ text: '(', script }, ...runs, { text: ')', script }];
+}
+
+/**
+ * The mark after every symbol: \bar{x} → x̄, \overline{AB} → A̅B̅. An arrow over
+ * several symbols (\vec{AB}) is a bar over them with the head over the end it points to.
+ */
+function accented(runs: MathRun[], mark: string): MathRun[] {
+  const total = runs.reduce((n, r) => n + [...r.text].filter((c) => c.trim()).length, 0);
+  const heads: Record<string, (k: number) => string> = {
+    '⃗': (k) => (k === total ? mark : OVERLINE),
+    '⃖': (k) => (k === 1 ? mark : OVERLINE),
+    '⃡': (k) => (k === 1 ? '⃖' : k === total ? '⃗' : OVERLINE),
+  };
+  const markAt = total > 1 && heads[mark] ? heads[mark] : () => mark;
+  let k = 0;
+  return runs.map((r) => ({ ...r, text: [...r.text].map((c) => (c.trim() ? c + markAt(++k) : c)).join('') }));
 }
 
 /** Merge neighbours of the same kind and tidy the spaces. */

@@ -15,7 +15,8 @@ export type AnalysisOp =
   | { op: 'ruling'; warp: unknown; wMm: number; hMm: number }
   | { op: 'curvedSides'; corners: Pt[] }
   | { op: 'bend'; warp: unknown; wMm: number; hMm: number; step: number; offset: number; slope: number; nx: number; ny: number }
-  | { op: 'mask'; corners: Pt[]; wMm: number; hMm: number; scale: number };
+  | { op: 'mask'; corners: Pt[]; wMm: number; hMm: number; scale: number }
+  | { op: 'perspective'; focal: number };
 
 const ready = init();
 let desk: Desk | null = null;
@@ -56,6 +57,9 @@ self.onmessage = async (e: MessageEvent<{ id: number; req: AnalysisOp }>) => {
           break;
         case 'ruling':
           result = JSON.parse(desk.ruling(JSON.stringify(req.warp), req.wMm, req.hMm));
+          break;
+        case 'perspective':
+          result = JSON.parse(desk.perspective(req.focal));
           break;
         case 'curvedSides':
           result = JSON.parse(desk.curvedSides(JSON.stringify(req.corners)));

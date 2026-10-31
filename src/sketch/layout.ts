@@ -1,11 +1,13 @@
 // From a scene to ink on paper: the window and the scale, the hand-drawn
 // lines, and where every label goes so that it does not sit on a line.
+import { romanize } from '../blank/roman';
+import { hasGlyph } from '../engine/handwriting';
 import { convertMathInText, convertTex, type MathRun } from '../editor/tex';
 import * as g from './geometry';
 import type { LabelInk } from './labels';
 import { formatNumber } from './lang';
 import { dashes, dot, hatch, outline, rng, wobble, type Pen } from './pen';
-import type { Item, Scene, Shape, Vec } from './types';
+import type { Hatching, Item, Scene, Shape, Vec } from './types';
 
 export interface InkPath {
   d: string;
@@ -35,6 +37,13 @@ export interface LabelRequest {
   fixed?: boolean;
 }
 
+/** Where the needle of the compasses went in: a circle's or an arc's centre, px, and the radius drawn from it. */
+export interface Pivot {
+  x: number;
+  y: number;
+  r: number;
+}
+
 export interface SketchLayout {
   width: number;
   height: number;
@@ -42,6 +51,10 @@ export interface SketchLayout {
   labels: LabelRequest[];
   /** Points along every drawn line: labels keep clear of them. */
   obstacles: Vec[];
+  /** Every drawn line as the hand moved (px, before its wobble; not the grid): where the paper got rubbed. */
+  lines: Vec[][];
+  /** Centres of what was drawn with compasses. */
+  pivots: Pivot[];
   /** Nothing to draw yet. */
   empty: boolean;
 }
@@ -123,8 +136,56 @@ function graphRange(graphs: Extract<Shape, { type: 'graph' }>[], xr: [number, nu
 
 const SHAPELY = new Set<Shape['type']>(['circle', 'arc', 'angle', 'curve', 'polygon']);
 
-/** The window, the scale and the size of a drawing `width` px wide. */
+/** From this radius on (mm) circles and arcs are drawn with compasses. */
+const COMPASS_MIN = 6;
+
+/** CSS px per millimetre (the sheet's own scale). */
+const PX_MM = 96 / 25.4;
+/** Room around what a drawing on a blank shows (its labels, lines run on), mm. */
+const BLANK_PAD = 8;
+
+/**
+ * A drawing on a blank (НаБланке): the box it takes on the sheet, sheet px —
+ * what it shows, with room round it — and the origin's place in sheet px.
+ */
+export function blankBoxOf(scene: Scene): { x: number; y: number; w: number; h: number; ox: number; oy: number; ppu: number } | null {
+  const b = scene.view.blank;
+  if (!b) return null;
+  const ppu = PX_MM * b.unit;
+  const ox = b.x * PX_MM;
+  const oy = b.y * PX_MM;
+  const pts = scene.items
+    .filter((i) => !i.hidden)
+    .flatMap((i) => g.extentPoints(i.shape))
+    .filter(finite)
+    .map((p) => ({ x: ox + p.x * ppu, y: oy - p.y * ppu }));
+  if (!pts.length) pts.push({ x: ox, y: oy });
+  const pad = BLANK_PAD * PX_MM;
+  const x = Math.min(...pts.map((p) => p.x)) - pad;
+  const y = Math.min(...pts.map((p) => p.y)) - pad;
+  const w = Math.max(...pts.map((p) => p.x)) + pad - x;
+  const h = Math.max(...pts.map((p) => p.y)) + pad - y;
+  return { x, y, w, h, ox, oy, ppu };
+}
+
+/** The window, the scale and the size of a drawing `width` px wide (on a blank: of its own size, by the sheet). */
 function frameOf(scene: Scene, width: number, fs: number): Frame {
+  const box = blankBoxOf(scene);
+  if (box) {
+    return {
+      width: box.w,
+      height: box.h,
+      rect: { x0: 0, y0: 0, x1: box.w, y1: box.h },
+      x: [(box.x - box.ox) / box.ppu, (box.x + box.w - box.ox) / box.ppu],
+      y: [(box.oy - box.y - box.h) / box.ppu, (box.oy - box.y) / box.ppu],
+      ppx: box.ppu,
+      ppy: box.ppu,
+      axes: false,
+      grid: scene.view.grid ?? false,
+      xPi: false,
+      yPi: false,
+    };
+  }
   const items = scene.items.filter((i) => !i.hidden);
   const graphs = items.map((i) => i.shape).filter((s): s is Extract<Shape, { type: 'graph' }> => s.type === 'graph');
   // Circles must stay round: one scale for both axes, unless only graphs are drawn.
@@ -248,12 +309,12 @@ function aroundPoint(p: Vec, gap: number): Spot[] {
 }
 
 /**
- * Further places around a point, for crowded corners: two more rings of
+ * Further places around a point, for crowded corners: three more rings of
  * twelve directions. The label's box always opens away from the point.
  */
 function ringsAround(p: Vec, gap: number): Spot[] {
   const out: Spot[] = [];
-  [2.1, 3.2].forEach((k, ring) => {
+  [2.1, 3.2, 4.6].forEach((k, ring) => {
     for (let i = 0; i < 12; i++) {
       const a = Math.PI / 4 + (i * Math.PI) / 6;
       const c = Math.cos(a);
@@ -265,7 +326,7 @@ function ringsAround(p: Vec, gap: number): Spot[] {
   return out;
 }
 
-/** Places beside a drawn line, at the given shares of its length (nearer first, then a little further off). */
+/** Places beside a drawn line, at the given shares of its length (nearer first, then further off). */
 function alongLine(pieces: Vec[][], shares: number[], gap: number): Spot[] {
   const all = pieces.flat();
   if (all.length < 2) return [];
@@ -273,7 +334,7 @@ function alongLine(pieces: Vec[][], shares: number[], gap: number): Spot[] {
   for (let i = 1; i < all.length; i++) cum.push(cum[i - 1] + g.dist(all[i - 1], all[i]));
   const total = cum[cum.length - 1];
   const out: Spot[] = [];
-  [1, 2].forEach((k, far) => {
+  [1, 2, 3.2].forEach((k, far) => {
     shares.forEach((share, j) => {
       const at = total * share;
       const i = Math.max(1, cum.findIndex((c) => c >= at));
@@ -297,6 +358,70 @@ function continuous(f: (x: number) => number, xa: number, ya: number, xb: number
   return continuous(f, xa, ya, xm, ym, depth + 1) && continuous(f, xm, ym, xb, yb, depth + 1);
 }
 
+/** A disc a line does not cross: an open point. */
+interface Hole {
+  c: Vec;
+  r: number;
+  /** Radius of the ring drawn round it, px. */
+  ring: number;
+  seed: number;
+}
+
+/**
+ * The parts of a polyline outside the holes. `reach`: how far from a hole's
+ * centre this line stops as it comes in (`entering`) and starts again as it
+ * goes out — each end of a line meets an open point its own way; 0 or less:
+ * the line runs through.
+ */
+function outsideHoles(pts: Vec[], holes: Hole[], reach?: (h: Hole, entering: boolean) => number): Vec[][] {
+  if (!holes.length) return [pts];
+  const out: Vec[][] = [];
+  let cur: Vec[] = [];
+  const at = (p: Vec, q: Vec, t: number): Vec => ({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t });
+  // A line that ends at an open point meets it once: that end's reach holds for the whole way in
+  // (else a bit run past the centre could show on its own).
+  const [first, last] = [pts[0], pts[pts.length - 1]];
+  const into = holes.map((h) => (reach ? reach(h, true) : h.r));
+  const outOf = holes.map((h, k) => (reach ? reach(h, false) : into[k]));
+  const once = holes.map((h, k) => (g.dist(last, h.c) < h.r ? into[k] : g.dist(first, h.c) < h.r ? outOf[k] : null));
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i - 1];
+    const q = pts[i];
+    const d = g.sub(q, p);
+    const dd = g.dot(d, d);
+    // Where along p→q the segment is inside a hole: intervals of t, merged.
+    const inside: [number, number][] = [];
+    for (const [k, h] of holes.entries()) {
+      if (dd < 1e-12) continue;
+      const f = g.sub(p, h.c);
+      const hr = once[k] ?? (g.dot(d, g.sub(h.c, at(p, q, 0.5))) > 0 ? into[k] : outOf[k]);
+      if (hr <= 0.5) continue;
+      const b = g.dot(f, d);
+      const disc = b * b - dd * (g.dot(f, f) - hr * hr);
+      if (disc <= 0) continue;
+      const t0 = (-b - Math.sqrt(disc)) / dd;
+      const t1 = (-b + Math.sqrt(disc)) / dd;
+      if (t1 > 0 && t0 < 1) inside.push([Math.max(0, t0), Math.min(1, t1)]);
+    }
+    inside.sort((u, v) => u[0] - v[0]);
+    if (!cur.length) cur.push(p);
+    let t = 0;
+    for (const [a, b] of inside) {
+      if (b <= t) continue;
+      if (a > t) cur.push(at(p, q, a));
+      if (cur.length > 1) out.push(cur);
+      cur = [];
+      t = b;
+    }
+    if (t < 1) {
+      if (!cur.length) cur.push(at(p, q, t));
+      cur.push(q);
+    }
+  }
+  if (cur.length > 1) out.push(cur);
+  return out;
+}
+
 /** Text of a label: A_1 becomes A with index 1, $…$ parts are formulas. */
 function labelRuns(text: string): MathRun[] {
   return convertMathInText(text) ?? convertTex(text);
@@ -315,12 +440,47 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
   const paths: InkPath[] = [];
   const labels: LabelRequest[] = [];
   const obstacles: Vec[] = [];
+  const lines: Vec[][] = [];
+  const pivots: Pivot[] = [];
   const items = scene.items.filter((i) => !i.hidden);
+  // Compasses: an even line — the lead goes round the needle, the hand only turns the head.
+  const compassPen: Pen = { ...pen, wobble: (pen.wobble ?? 1) * 0.06, jitter: pen.jitter * 0.3, pressure: pen.pressure * 0.25 };
+  const byCompass = (rPx: number) => (!!scene.view.blank || pen.compass === true) && rPx >= COMPASS_MIN * PX_MM;
   const base = items.reduce((h, it) => mix(h, it.seed), mix(2166136261, scene.title ? scene.title.length : 0));
   const gap = fs * 0.22;
   const dashUnit = Math.max(1.3, pen.width);
   const view: g.Rect = { x0: rect.x0 - 1, y0: rect.y0 - 1, x1: rect.x1 + 1, y1: rect.y1 + 1 };
   const inView = (p: Vec, m = 0) => p.x >= rect.x0 - m && p.x <= rect.x1 + m && p.y >= rect.y0 - m && p.y <= rect.y1 + m;
+  /** One millimetre on the sheet for a drawing on a blank, else a share of the letters. */
+  const mmOr = (mm: number, ofFs: number) => (scene.view.blank ? mm * PX_MM : fs * ofFs);
+  const ppu = (fr.ppx + fr.ppy) / 2;
+  const pointRadius = (it: Item) => Math.max(1.8, pen.width * 1.1 + fs * 0.05) * Math.sqrt(it.thickness / 5);
+  const unevenPoints = pen.points ?? 1;
+  const unevenJoins = pen.joins ?? 1;
+  /**
+   * How the hand put a point down (the same every time: its seed): a little
+   * bigger or smaller, an open ring a little oval and off the exact spot.
+   * `ring`: radius of an open point's ring; `r` goes on for the rest of its look.
+   */
+  const handPoint = (it: Item) => {
+    const r = rng(mix(it.seed, 0x9017));
+    const a = unevenPoints;
+    const p = T((it.shape as Extract<Shape, { type: 'point' }>).p);
+    const radius = pointRadius(it) * (1 + a * (r() * 0.35 - 0.15));
+    const ratio = 1 + a * (r() - 0.5) * 0.2;
+    const rot = a ? r() * Math.PI : 0;
+    const off = a * r() * radius * (it.pointStyle === 2 ? 1.7 * 0.25 : 0.15);
+    const c = g.add(p, g.mul(g.dir(r() * Math.PI * 2), off));
+    return { p, c, off, radius, ring: radius * 1.7, ratio, rot, r };
+  };
+  // Open points first: no line runs through them, whatever is drawn before them.
+  const holes: Hole[] = items
+    .filter((it) => it.shape.type === 'point' && it.pointStyle === 2)
+    .map((it) => {
+      const h = handPoint(it);
+      return { c: h.c, r: h.ring * Math.max(1, h.ratio) + pen.width * 0.5 + 0.15 * PX_MM, ring: h.ring, seed: it.seed };
+    })
+    .filter((h) => inView(h.c, 2));
 
   interface Look {
     seed: number;
@@ -331,16 +491,41 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     opacity?: number;
     /** Labels keep clear of it (not of the grid). */
     solid?: boolean;
+    /** Drawn whole even across open points (their own circles). */
+    whole?: boolean;
+    /** Drawn with compasses. */
+    compass?: boolean;
   }
   const stroke = (pts: Vec[], look: Look, salt = 0) => {
     if (pts.length < 2) return;
-    const r = rng(mix(look.seed, salt + 1));
-    const center = wobble(pts, r, pen, { straight: look.straight });
-    const d = dashes(center, look.style ?? 0, dashUnit)
-      .map((p) => outline(p, r, pen, look.weight ?? 1))
+    const lineSeed = mix(look.seed, salt + 1);
+    const r = rng(lineSeed);
+    const hand = look.compass ? compassPen : pen;
+    const center = wobble(pts, r, hand, { straight: look.straight });
+    // Where this line stops at an open point: short of the ring, on it, inside it, or nearly at the centre.
+    const reach = (h: Hole, entering: boolean) => {
+      if (!unevenJoins) return h.r;
+      const rr = rng(mix(mix(lineSeed, h.seed), entering ? 1 : 2));
+      const [u, v] = [rr(), rr()];
+      const target =
+        u < 0.3
+          ? h.r + (0.1 + 0.5 * v) * PX_MM
+          : u < 0.55
+            ? h.ring + pen.width * (0.2 + 0.6 * v)
+            : u < 0.9
+              ? h.ring * (0.35 + 0.4 * v)
+              : h.ring * 0.15 * v;
+      return h.r + (target - h.r) * unevenJoins;
+    };
+    const d = (look.whole ? [center] : outsideHoles(center, holes, reach))
+      .flatMap((piece) => dashes(piece, look.style ?? 0, dashUnit))
+      .map((p) => outline(p, r, hand, look.weight ?? 1))
       .join('');
     if (d) paths.push({ d, color: look.color, opacity: look.opacity });
-    if (look.solid !== false) for (let i = 0; i < center.length; i += 2) obstacles.push(center[i]);
+    if (look.solid !== false) {
+      for (let i = 0; i < center.length; i += 2) obstacles.push(center[i]);
+      lines.push(pts);
+    }
   };
   const arrowHead = (tip: Vec, from: Vec, look: Look, salt: number) => {
     const d = g.unit(g.sub(from, tip));
@@ -395,8 +580,8 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     if (originShown) label('0', fs * 0.58, [{ x: ax - fs * 0.22, y: ay + fs * 0.22, ax: 1, ay: 0 }], mix(base, 23), undefined, true);
   }
 
-  // ---- the epure: axis x₁₂ (or x, y, z with a profile projection), the origin O
-  if (scene.view.epure) {
+  // ---- the epure: axis x₁₂ (or x, y, z with a profile projection), the origin O — printed already on a blank
+  if (scene.view.epure && !scene.view.blank) {
     const profile = (scene.view.planes ?? [1, 2]).includes(3);
     const sx = scene.view.xRight ? 1 : -1;
     const look: Look = { seed: mix(base, 41), straight: true, weight: 0.8 };
@@ -438,12 +623,46 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     };
     switch (s.type) {
       case 'point': {
-        const p = T(s.p);
-        if (!inView(p, 2)) break;
+        if (!inView(T(s.p), 2)) break;
         points.push(() => {
-          const radius = Math.max(1.8, pen.width * 1.1 + fs * 0.05) * Math.sqrt(it.thickness / 5);
-          paths.push({ d: dot(p, radius, rng(it.seed)), color: it.color });
-          obstacles.push(p, { x: p.x - radius, y: p.y }, { x: p.x + radius, y: p.y });
+          const hp = handPoint(it);
+          const { p, c, ratio, rot } = hp;
+          const a = unevenPoints;
+          const hr = hp.r;
+          let radius = hp.radius;
+          const mark: Look = { seed: it.seed, color: it.color, weight: 0.9 * (1 + a * (hr() * 0.25 - 0.17)), straight: true, whole: true };
+          if (it.pointStyle === 2) {
+            // An open circle by pen: it starts anywhere and runs a little past its start or stops just short —
+            // by hand also a little oval, and now and then its ends miss each other in a small loop.
+            const r = rng(mix(it.seed, 21));
+            radius = hp.ring;
+            const from = r() * Math.PI * 2;
+            const sweep = Math.PI * 2 + (r() - 0.4) * 0.35 + a * (hr() * 0.7 - 0.3);
+            const drift = a * (hr() < 0.15 ? 0.08 + 0.06 * hr() : 0.04 * hr()) * (hr() < 0.5 ? -1 : 1);
+            const [cr, sr] = [Math.cos(rot), Math.sin(rot)];
+            const ring = Array.from({ length: 21 }, (_, i) => {
+              const t = from + (sweep * i) / 20;
+              const R = radius * (1 + (drift * i) / 20);
+              const [lx, ly] = [Math.cos(t - rot) * R, Math.sin(t - rot) * R * ratio];
+              return { x: c.x + lx * cr - ly * sr, y: c.y + lx * sr + ly * cr };
+            });
+            stroke(ring, { ...mark, straight: false }, 0);
+          } else if (it.pointStyle === 1 || it.pointStyle === 3) {
+            // A cross × or a plus +: two short strokes, by hand a little turned, the arms not quite equal.
+            radius *= 1.6;
+            const turn = (it.pointStyle === 1 ? Math.PI / 4 : 0) + a * (hr() - 0.5) * 0.28;
+            for (const k of [0, 1]) {
+              const d = g.dir(turn + (k * Math.PI) / 2);
+              const [l0, l1] = [radius * (1 + a * (hr() - 0.5) * 0.4), radius * (1 + a * (hr() - 0.5) * 0.4)];
+              stroke([g.sub(c, g.mul(d, l0)), g.add(c, g.mul(d, l1))], mark, k);
+            }
+          } else {
+            const stretch = a ? { angle: hr() * Math.PI * 2, by: 1 + a * 0.3 * hr() } : undefined;
+            paths.push({ d: dot(c, radius, rng(it.seed), stretch), color: it.color });
+          }
+          // Labels keep clear of the ring wherever the hand put it.
+          radius += hp.off;
+          obstacles.push(p, { x: p.x - radius, y: p.y }, { x: p.x + radius, y: p.y }, { x: p.x, y: p.y - radius }, { x: p.x, y: p.y + radius });
           if (it.showLabel && caption.trim()) pointLabels.push({ p, radius, caption, seed: lseed, color: it.color });
         });
         break;
@@ -465,15 +684,35 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
       case 'arc': {
         const r = rng(mix(it.seed, 3));
         const full = s.type === 'circle';
-        // A hand-drawn circle starts anywhere, runs a little past its start and does not quite close.
-        const from = full ? r() * Math.PI * 2 : s.from;
-        const sweep = full ? Math.PI * 2 + 0.15 + r() * 0.25 : s.sweep;
-        const drift = full ? ((r() - 0.5) * 3) / fr.ppx : 0;
+        const rPx = s.r * ppu;
+        const compass = byCompass(rPx);
+        let from: number;
+        let sweep: number;
+        let drift: number;
+        if (compass) {
+          // Compasses: a full turn and 5–20° more, the lead slipping 0.1–0.2 mm on the way (a step where it closes);
+          // an arc runs on 1–3 mm past both its ends, as notches are drawn.
+          const past = full ? 0 : ((1 + 2 * r()) * PX_MM) / rPx;
+          const dirn = s.type === 'circle' ? 1 : Math.sign(s.sweep) || 1;
+          from = s.type === 'circle' ? r() * Math.PI * 2 : s.from - dirn * past;
+          sweep = s.type === 'circle' ? Math.PI * 2 + ((5 + 15 * r()) * Math.PI) / 180 : s.sweep + dirn * (past + ((1 + 2 * r()) * PX_MM) / rPx);
+          drift = full ? ((r() < 0.5 ? -1 : 1) * (0.1 + 0.1 * r()) * PX_MM) / ppu : 0;
+          const c = T(s.c);
+          pivots.push({ x: c.x, y: c.y, r: rPx });
+        } else {
+          // A hand-drawn circle starts anywhere, runs a little past its start and does not quite close.
+          from = full ? r() * Math.PI * 2 : s.from;
+          sweep = full ? Math.PI * 2 + 0.15 + r() * 0.25 : s.sweep;
+          drift = full ? ((r() - 0.5) * 3) / fr.ppx : 0;
+        }
         const n = Math.max(24, Math.ceil((Math.abs(sweep) * s.r * Math.max(fr.ppx, fr.ppy)) / 4));
         const world: Vec[] = [];
         for (let i = 0; i <= n; i++) world.push(g.add(s.c, g.mul(g.dir(from + (sweep * i) / n), s.r + (drift * i) / n)));
-        g.clipPolyline(world.map(T), view).forEach((piece, i) => draw(piece, false, i));
-        if (full && it.filling > 0) fill(Array.from({ length: 64 }, (_, i) => T(g.add(s.c, g.mul(g.dir((i / 64) * Math.PI * 2), s.r)))), it);
+        g.clipPolyline(world.map(T), view).forEach((piece, i) => {
+          pieces.push(piece);
+          stroke(piece, { ...look, straight: false, compass }, i);
+        });
+        if (full && (it.filling > 0 || it.hatch)) fill(Array.from({ length: 64 }, (_, i) => T(g.add(s.c, g.mul(g.dir((i / 64) * Math.PI * 2), s.r)))), it);
         if (it.showLabel) {
           const spots: Spot[] = [];
           const angles = full ? [Math.PI / 4, (3 * Math.PI) / 4, (-3 * Math.PI) / 4, -Math.PI / 4] : [s.from + s.sweep / 2];
@@ -493,7 +732,7 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
           const c = g.clipLine(p, g.sub(q, p), 0, 1, view);
           if (c) draw(c, true, i);
         });
-        if (it.filling > 0) fill(pts, it);
+        if (it.filling > 0 || it.hatch) fill(pts, it);
         if (it.showLabel) {
           const c = pts.reduce((acc, p) => g.add(acc, g.mul(p, 1 / pts.length)), { x: 0, y: 0 });
           label(caption, fs * 0.85, [{ x: c.x, y: c.y, ax: 0.5, ay: 0.5 }], lseed, it.color);
@@ -585,9 +824,45 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
         if (it.showLabel) label(caption, fs * 0.85, alongLine(pieces, [0.15, 0.4, 0.65, 0.9], gap), lseed, it.color);
         break;
       }
+      case 'region': {
+        fill(s.pts.map(T), it, s.hatch);
+        if (it.showLabel && caption.trim()) {
+          const pts = s.pts.map(T);
+          const c = pts.reduce((acc, q) => g.add(acc, g.mul(q, 1 / pts.length)), { x: 0, y: 0 });
+          label(caption, fs * 0.85, [{ x: c.x, y: c.y, ax: 0.5, ay: 0.5 }], lseed, it.color);
+        }
+        break;
+      }
+      case 'hatched': {
+        const a = T(s.a);
+        const b = T(s.b);
+        const range = s.of === 'line' ? [-Infinity, Infinity] : s.of === 'ray' ? [0, Infinity] : [0, 1];
+        const c = g.clipLine(a, g.sub(b, a), range[0], range[1], view);
+        if (!c) break;
+        if (s.line) draw(c, true, 0);
+        const u = g.unit(g.sub(c[1], c[0]));
+        let n = g.perp(u);
+        if (g.dot(g.sub(T(s.side), c[0]), n) < 0) n = g.mul(n, -1);
+        // Ticks at 45° to the line, leaning the same way, as drawn by hand one after another.
+        const tick = g.unit(g.add(n, u));
+        const len = s.len ? s.len * ppu : mmOr(1.5, 0.45);
+        const step = s.gap ? s.gap * ppu : mmOr(2, 0.5);
+        const total = g.dist(c[0], c[1]);
+        const r = rng(mix(it.seed, 13));
+        const tickLook: Look = { ...look, style: 0, weight: (look.weight ?? 1) * 0.8, straight: true };
+        let k = 0;
+        for (let t = step * (0.3 + 0.4 * r()); t < total - step * 0.2; t += step * (0.9 + 0.2 * r())) {
+          const from = g.add(c[0], g.mul(u, t));
+          const dir = g.rotate(tick, (r() - 0.5) * 0.1);
+          stroke([from, g.add(from, g.mul(dir, len * (0.85 + 0.3 * r())))], tickLook, 10 + k++);
+        }
+        if (it.showLabel && s.line) label(caption, fs * 0.85, alongLine(pieces, [0.5, 0.35, 0.65, 0.2, 0.8], gap), lseed, it.color);
+        break;
+      }
       case 'text': {
         const at = s.at ? T(s.at) : { x: rect.x0 + fs * 0.2, y: rect.y0 + fs * (0.9 + 1.1 * texts++) };
-        label(s.text, fs * 0.85, [{ x: at.x, y: at.y, ax: 0, ay: 1 }], lseed, it.color, true);
+        // A text may hold Roman numerals (I, II чверть): written as sticks.
+        label(romanize(s.text, [], hasGlyph), fs * 0.85, [{ x: at.x, y: at.y, ax: 0, ay: 1 }], lseed, it.color, true);
         break;
       }
     }
@@ -609,21 +884,41 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     label(captions.join(' ≡ '), fs * 0.9, spots, grp[0].seed, colors.size === 1 ? grp[0].color : undefined);
   }
 
-  function fill(poly: Vec[], it: Item) {
+  /** Hatching inside a polygon (px): SetFilling's, or Hatch's with its direction and spacing. */
+  function fill(poly: Vec[], it: Item, own?: Hatching) {
     const r = rng(mix(it.seed, 5));
-    const lines = hatch(poly, fs * (0.5 - 0.32 * it.filling), Math.PI / 4 + (r() - 0.5) * 0.12);
+    const h = own ?? it.hatch;
+    // A direction of the drawing becomes one on the sheet (y down, the units' own scale).
+    const angle = h ? Math.atan2(-Math.sin(h.angle) * fr.ppy, Math.cos(h.angle) * fr.ppx) : Math.PI / 4;
+    const step = h ? (h.gap ? h.gap * ppu : mmOr(2, 0.4)) : fs * (0.5 - 0.32 * it.filling);
     const look: Look = { seed: mix(it.seed, 9), color: it.color, weight: 0.55, opacity: 0.75, straight: true, solid: false };
-    lines.forEach(([p, q], i) => {
-      // The hand stops a little short of the outline.
-      const d = g.unit(g.sub(q, p));
-      const inset = Math.min(1.5, g.dist(p, q) / 4);
-      stroke([g.add(p, g.mul(d, inset)), g.sub(q, g.mul(d, inset))], look, i);
-    });
+    const families = h?.cross ? [angle, angle + Math.PI / 2] : [angle];
+    let i = 0;
+    for (const a of families) {
+      for (const [p0, q0] of hatch(poly, Math.max(step, pen.width * 1.5), a + (r() - 0.5) * 0.04, r)) {
+        const c = g.clipLine(p0, g.sub(q0, p0), 0, 1, view);
+        if (!c) continue;
+        const [p, q] = c;
+        // The hand mostly stops a little short of the outline, sometimes runs a hair past it.
+        const d = g.unit(g.sub(q, p));
+        const room = g.dist(p, q) / 4;
+        const end = () => Math.min(room, fs * (r() < 0.25 ? -0.05 * r() : 0.03 + 0.09 * r()));
+        stroke([g.add(p, g.mul(d, end())), g.sub(q, g.mul(d, end()))], look, i++);
+      }
+    }
   }
 
   if (scene.title) label(scene.title, fs * 1.05, [{ x: width / 2, y: fs * 0.25, ax: 0.5, ay: 0 }], mix(base, 31), undefined, true);
 
-  return { width, height: fr.height, paths, labels, obstacles, empty: !items.length && !scene.title && !fr.axes };
+  return { width, height: fr.height, paths, labels, obstacles, lines, pivots, empty: !items.length && !scene.title && !fr.axes };
+}
+
+/** What else lies under a box of a drawing (its px) — on a blank, the sheet around it. */
+export interface Around {
+  /** Points of lines and printing under the box: a label crosses them only when it must. */
+  hits(box: g.Rect): number;
+  /** Share of the box under what a label is never written over: printed letters and points, notes, other labels. */
+  covered(box: g.Rect): number;
 }
 
 /**
@@ -631,9 +926,11 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
  * other label, the nearest such one. Fixed labels (axis numbers, texts, the
  * title) go first and leave their spot only when it covers a line; then the
  * labels with the fewest free spots, so a crowded point gets its place before
- * an easy one takes it.
+ * an easy one takes it. A label never lies on another one (or on printed
+ * letters) while any spot is free of them: running further out, or across a
+ * line, is always better than letters written over letters.
  */
-export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel[] {
+export function placeLabels(layout: SketchLayout, inks: LabelInk[], around?: Around): PlacedLabel[] {
   const cell = 12;
   const grid = new Map<string, Vec[]>();
   for (const p of layout.obstacles) {
@@ -659,9 +956,16 @@ export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel
   // Any line through a label is worse than moving it a ring further out.
   const LINE = 10;
   const PER_HIT = 4;
+  /** However many lines a label crosses, it costs no more than this many: letters over letters always cost more. */
+  const MAX_HITS = 15;
+  // Letters over letters (another label, a printed «C₁»): worse than any line.
+  const ON_TEXT = LINE + PER_HIT * MAX_HITS;
   const pad = 2;
-  /** Labels keep a little air between each other. */
+  /** Labels keep a little air between each other and from printed letters. */
   const apart = 4;
+  const grow = (b: g.Rect, by: number) => ({ x0: b.x0 - by, y0: b.y0 - by, x1: b.x1 + by, y1: b.y1 + by });
+  /** Cost of a box whose `core` share lies under letters, `near` share of its air around. */
+  const onText = (core: number, near: number) => (core > 1e-3 ? ON_TEXT + 400 * core : 0) + (near > 1e-3 ? 8 + 40 * near : 0);
   const boxes = layout.labels.map((req, i) => {
     const s = req.size / 1000;
     const ink = inks[i];
@@ -669,11 +973,13 @@ export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel
     const h = (ink.y1 - ink.y0) * s;
     return req.spots.map((sp, k) => {
       const box = { x0: sp.x - sp.ax * w, y0: sp.y - sp.ay * h, x1: sp.x - sp.ax * w + w, y1: sp.y - sp.ay * h + h };
-      const n = w > 0 && h > 0 ? hits({ x0: box.x0 - pad, y0: box.y0 - pad, x1: box.x1 + pad, y1: box.y1 + pad }) : 0;
+      const padded = grow(box, pad);
+      const n = w > 0 && h > 0 ? hits(padded) + (around ? around.hits(padded) : 0) : 0;
+      const text = around && w > 0 && h > 0 ? onText(around.covered(box), around.covered(grow(box, apart))) : 0;
       const a = Math.max(area(box), 1e-6);
       const inside = overlap(box, { x0: 0, y0: 0, x1: layout.width, y1: layout.height });
       const order = req.fixed ? (k === 0 ? 0 : 12 + k) : sp.cost ?? k * 0.6;
-      return { box, base: order + (n ? LINE + PER_HIT * n : 0) + (25 * (a - inside)) / a };
+      return { box, base: order + (n ? LINE + PER_HIT * Math.min(n, MAX_HITS) : 0) + text + (25 * (a - inside)) / a };
     });
   });
   // Hardest first: the label whose best spot (ignoring other labels) is worst.
@@ -690,8 +996,10 @@ export function placeLabels(layout: SketchLayout, inks: LabelInk[]): PlacedLabel
     let bestCost = Infinity;
     for (const { box, base } of boxes[i]) {
       const a = Math.max(area(box), 1e-6);
-      const crowd = taken.reduce((sum, t) => sum + overlap({ x0: box.x0 - apart, y0: box.y0 - apart, x1: box.x1 + apart, y1: box.y1 + apart }, t), 0);
-      const cost = base + (crowd ? LINE + (30 * crowd) / a : 0);
+      const air = grow(box, apart);
+      const core = taken.reduce((sum, t) => sum + overlap(box, t), 0) / a;
+      const near = taken.reduce((sum, t) => sum + overlap(air, t), 0) / Math.max(area(air), 1e-6);
+      const cost = base + onText(core, near);
       if (cost < bestCost) {
         bestCost = cost;
         best = box;

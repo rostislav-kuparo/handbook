@@ -471,24 +471,38 @@ pub fn adapt_entry(ink: &mut GlyphInk, target: Level, joins: &Joins) -> bool {
 
 /// Cut a lead-in that rises from below where it first reaches height `y`
 /// (within the first `share` of the stroke): the pen arrives there from a
-/// letter that leaves high, as after «о». The stroke starts at index 0.
+/// letter that leaves high, as after «о». A lead-in that never gets that high
+/// is cut at its top: the pen comes across to it rather than dropping to its
+/// start and climbing again (a notch). The stroke starts at index 0.
 pub fn trim_lead_in(s: &mut Stroke, y: f64, share: f64) -> bool {
     let len = stroke_length(s);
     let mut acc = 0.0;
+    let mut top = 0;
+    let mut cut = None;
     for i in 1..s.len() {
         acc += s[i - 1].dist(&s[i]);
         if acc > len * share {
-            return false;
+            break;
         }
         if s[i].y >= y - 4.0 {
-            if s.len() - i >= 2 {
-                s.drain(..i);
-                return true;
-            }
-            return false;
+            cut = Some(i);
+            break;
+        }
+        if s[i].y > s[top].y {
+            top = i;
+        } else if s[top].y - s[i].y > 20.0 {
+            break; // the rise is over: its top is where the letter itself begins
         }
     }
-    false
+    // Only a lead-in that really rises (not a stroke that starts at its top).
+    let cut = cut.or((top > 0 && s[top].y > s[0].y + 60.0).then_some(top));
+    match cut {
+        Some(i) if s.len() - i >= 2 => {
+            s.drain(..i);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Cut a joining tail short: the part of the exit stroke that runs out past
@@ -630,13 +644,45 @@ pub fn outward(s: &Stroke, at_start: bool) -> (f64, f64) {
     (dx / l, dy / l)
 }
 
+/// The stroke without its first `len` units from this end (empty when it is no longer).
+pub fn without_start(s: &Stroke, at_start: bool, len: f64) -> Stroke {
+    let pts: Vec<Pt> = if at_start { s.clone() } else { s.iter().rev().copied().collect() };
+    let mut walked = 0.0;
+    for i in 1..pts.len() {
+        walked += pts[i - 1].dist(&pts[i]);
+        if walked >= len {
+            return pts[i..].to_vec();
+        }
+    }
+    vec![]
+}
+
+/// The stroke runs down from this end (the top of a stem: «і», «ч» written
+/// without a lead-in): over its first `len` units it drops most of that length,
+/// after at most a small tick up where the pen touched down.
+pub fn runs_down(s: &Stroke, at_start: bool, len: f64) -> bool {
+    let pts: Vec<Pt> = if at_start { s.clone() } else { s.iter().rev().copied().collect() };
+    let mut walked = 0.0;
+    let mut top = pts.first().map_or(0.0, |p| p.y);
+    for w in pts.windows(2) {
+        walked += w[0].dist(&w[1]);
+        top = top.max(w[1].y);
+        if walked >= len {
+            return top - pts[0].y < 60.0 && pts[0].y - w[1].y > 0.6 * len;
+        }
+    }
+    false
+}
+
 /// The stroke a hand draws from one letter's exit `from` to the next one's
 /// start `to`. The hand moves fastest there, so it is nearly straight: it
 /// only bends at its very ends, leaving along `out_dir` and arriving along
 /// `in_dir`, always moving on to the right. `over`: the letter starts inside
 /// its own width (the top of the bowl of «а», «d»), so the pen rises early and
-/// runs in along the top of the bowl. The returned points end just before `to`.
-pub fn connector(from: Pt, out_dir: (f64, f64), to: Pt, in_dir: (f64, f64), over: bool) -> Stroke {
+/// runs in along the top of the bowl. `stem`: `to` is the top of a stem (see
+/// [`runs_down`]), climbed to from the foot of the previous letter in one
+/// sweep. The returned points end just before `to`.
+pub fn connector(from: Pt, out_dir: (f64, f64), to: Pt, in_dir: (f64, f64), over: bool, stem: bool) -> Stroke {
     let len = from.dist(&to);
     if len < 1.0 {
         return vec![];
@@ -650,9 +696,15 @@ pub fn connector(from: Pt, out_dir: (f64, f64), to: Pt, in_dir: (f64, f64), over
     let (c1, c2) = if over {
         ((from.x + 0.2 * dx, from.y + 0.85 * dy), (to.x - 0.5 * dx, to.y + 0.03 * dx.abs()))
     } else {
-        let (o, i) = (onward(out_dir), onward(in_dir));
+        // Never away from where the pen is going: a tail that droops at its end
+        // goes on level, not down into a notch before the rise (and the other way round).
+        let (ox, oy) = out_dir;
+        let o = onward((ox, if dy > 0.0 { oy.max(0.0) } else { oy.min(0.0) }));
+        let i = onward(in_dir);
         let k = (0.12 * len).min(40.0);
-        ((from.x + o.0 * k, from.y + o.1 * k), (to.x - i.0 * k, to.y - i.1 * k))
+        // A climb to the top of a stem turns up the way the foot of «и» does, in one sweep.
+        let k1 = if stem { 0.35 * len } else { k };
+        ((from.x + o.0 * k1, from.y + o.1 * k1), (to.x - i.0 * k, to.y - i.1 * k))
     };
     let n = ((len * 1.3) / 5.0).ceil().max(2.0) as usize;
     (0..n)
@@ -989,10 +1041,23 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_in_too_low_for_a_high_exit_is_cut_at_its_top() {
+        // «о» as the user writes it: up to the top right, then back down its left side.
+        let mut s: Stroke = (0..=20).map(|i| Pt::new(150.0 + i as f64 * 8.0, 170.0 + i as f64 * 6.0, 0.5)).collect();
+        s.extend((1..=40).map(|i| Pt::new(310.0 - i as f64 * 4.0, 290.0 - i as f64 * 6.0, 0.5)));
+        s.extend((1..=40).map(|i| Pt::new(150.0 + i as f64 * 6.0, 50.0 + i as f64 * 4.0, 0.5)));
+        assert!(trim_lead_in(&mut s, 400.0, 0.4), "cut although it never reaches the exit's height");
+        assert!((s[0].y - 290.0).abs() < 1.0 && (s[0].x - 310.0).abs() < 1.0, "the pen comes in at the top: {:?}", s[0]);
+        // A stroke that starts at its top is no lead-in: nothing to cut.
+        let mut stem: Stroke = (0..=30).map(|i| Pt::new(100.0, 430.0 - i as f64 * 14.0, 0.5)).collect();
+        assert!(!trim_lead_in(&mut stem, 500.0, 0.4));
+    }
+
+    #[test]
     fn connecting_stroke_is_nearly_straight() {
         // Leaving a letter upwards, arriving along a lead-in that runs flat to the right.
         let (from, to) = (Pt::new(0.0, 30.0, 0.5), Pt::new(320.0, 240.0, 0.5));
-        let line = connector(from, (0.3, 0.95), to, (1.0, 0.0), false);
+        let line = connector(from, (0.3, 0.95), to, (1.0, 0.0), false, false);
         let len = from.dist(&to);
         let (dx, dy) = ((to.x - from.x) / len, (to.y - from.y) / len);
         let off = line.iter().map(|q| ((q.x - from.x) * dy - (q.y - from.y) * dx).abs()).fold(0.0, f64::max);

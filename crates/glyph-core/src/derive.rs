@@ -94,6 +94,58 @@ pub const PUNCTUATION: &[&str] = &[
     "→", "←", "↔", "⇒", "⇔", "∞", "√", "π", "∑", "∫", // arrows and the rest
 ];
 
+/// Combining marks written over the letter before them (x̄, a⃗, ẋ, â): drawn
+/// with the user's pen, their lowest point on the baseline (placed above the
+/// letter by the ink renderer and the font's mark positioning).
+pub const MARKS: &[&str] = &[
+    "\u{0304}", "\u{0305}", // macron, overline: x̄
+    "\u{20D7}", "\u{20D6}", "\u{20E1}", // arrows above: a⃗
+    "\u{0307}", "\u{0308}", // dot, two dots: ẋ, ẍ
+    "\u{0302}", "\u{030C}", "\u{0303}", // hat, caron, tilde
+    "\u{0301}", "\u{0300}", "\u{0306}", "\u{030A}", // acute, grave, breve, ring
+];
+
+pub fn is_mark(c: char) -> bool {
+    MARKS.iter().any(|m| m.starts_with(c))
+}
+
+/// Gap between the top of a letter (at least the x-height) and a mark over it.
+pub const MARK_GAP: f64 = 80.0;
+
+/// The marks' strokes (see [`MARKS`]), about 300 units wide.
+fn accent(mark: &str, w: f64) -> Option<Vec<Stroke>> {
+    let bar = || line(&[(20.0, 30.0 + w * 0.5), (160.0, 34.0), (300.0, 38.0 - w * 0.5)]);
+    let head_right = || line(&[(230.0, 85.0 + w * 0.5), (305.0, 38.0), (230.0, -5.0)]);
+    let head_left = || line(&[(90.0, 75.0), (15.0, 30.0), (90.0, -10.0 + w * 0.5)]);
+    Some(match mark {
+        "\u{0304}" | "\u{0305}" => vec![bar()],
+        "\u{20D7}" => vec![bar(), head_right()],
+        "\u{20D6}" => vec![bar(), head_left()],
+        "\u{20E1}" => vec![bar(), head_left(), head_right()],
+        "\u{0307}" => vec![dot(150.0 + w, 15.0)],
+        "\u{0308}" => vec![dot(90.0 + w, 15.0), dot(210.0, 15.0)],
+        "\u{0302}" => vec![line(&[(60.0, 0.0), (150.0 + w, 100.0), (240.0, 0.0)])],
+        "\u{030C}" => vec![line(&[(60.0, 100.0), (150.0 + w, 0.0), (240.0, 100.0)])],
+        "\u{0303}" => vec![curve(|t| (40.0 + 220.0 * t, 40.0 + 35.0 * (t * std::f64::consts::TAU).sin() + w * 0.3))],
+        "\u{0301}" => vec![line(&[(120.0, 0.0), (210.0 + w, 110.0)])],
+        "\u{0300}" => vec![line(&[(200.0, 0.0), (110.0 + w, 110.0)])],
+        "\u{0306}" => vec![arc(150.0, 90.0, 95.0, 90.0 + w * 0.5, 190.0, 350.0)],
+        "\u{030A}" => vec![arc(150.0 + w * 0.3, 55.0, 55.0, 55.0, 100.0, 470.0)],
+        _ => return None,
+    })
+}
+
+/// Puts a mark's strokes over a letter: centred, above its top (at least the x-height).
+pub fn put_mark(letter: &mut Vec<Stroke>, mark: Vec<Stroke>) {
+    let (b, m) = (strokes_bbox(letter), strokes_bbox(&mark));
+    if b.is_empty() || m.is_empty() {
+        return;
+    }
+    let dx = b.center_x() - m.center_x();
+    let dy = b.y_max.max(X_HEIGHT) + MARK_GAP - m.y_min;
+    letter.extend(mark.into_iter().map(|s| s.into_iter().map(|q| Pt { x: q.x + dx, y: q.y + dy, ..q }).collect()));
+}
+
 pub fn derive(kind: Kind, source: &[Prepared]) -> Vec<Prepared> {
     source
         .iter()
@@ -278,7 +330,7 @@ pub fn punctuation(mark: &str) -> Option<Vec<Prepared>> {
                 line(&[(60.0, 560.0), (110.0 + w, 680.0), (230.0, 700.0), (310.0, 610.0), (250.0, 470.0), (180.0, 360.0), (175.0, 170.0)]),
                 dot(170.0, 15.0),
             ],
-            _ => math_sign(mark, w)?,
+            _ => math_sign(mark, w).or_else(|| accent(mark, w))?,
         };
         Some(Prepared { strokes, entry: None, exit: None })
     };
@@ -340,8 +392,20 @@ mod tests {
 
     #[test]
     fn punctuation_has_three_variants() {
-        for m in PUNCTUATION {
+        for m in PUNCTUATION.iter().chain(MARKS) {
             assert_eq!(punctuation(m).unwrap().len(), 3, "{m}");
         }
+    }
+
+    #[test]
+    fn mark_sits_centred_above_the_letter() {
+        let x: Stroke = (0..=20).map(|k| Pt::new(100.0 + k as f64 * 15.0, k as f64 * 22.0, 0.5)).collect();
+        let mut strokes = vec![x];
+        put_mark(&mut strokes, accent("\u{0304}", 0.0).unwrap());
+        assert_eq!(strokes.len(), 2);
+        let (letter, bar) = (strokes_bbox(&strokes[..1]), strokes_bbox(&strokes[1..]));
+        assert!(bar.y_min >= X_HEIGHT + MARK_GAP - 1e-9);
+        assert!((bar.center_x() - letter.center_x()).abs() < 1e-9);
+        assert!(is_mark('\u{20D7}') && !is_mark('x'));
     }
 }

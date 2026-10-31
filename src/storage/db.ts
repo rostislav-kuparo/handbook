@@ -1,6 +1,8 @@
 // Local-first storage in IndexedDB. Nothing leaves the machine.
 import Dexie, { type EntityTable } from 'dexie';
-import type { SavedDesk } from '../desk/desks';
+import type { Blank } from '../blank/blank';
+import { fromOld, isOldDesk, type DeskPhotoRow, type SavedDesk } from '../desk/deskFormat';
+import type { PageSetup } from '../editor/page';
 import { DEFAULT_STYLE, DocContent, HandDocument, Sample, Style, uid } from '../model/types';
 
 interface SettingRow {
@@ -12,8 +14,12 @@ class HandbookDB extends Dexie {
   samples!: EntityTable<Sample, 'id'>;
   documents!: EntityTable<HandDocument, 'id'>;
   settings!: EntityTable<SettingRow, 'key'>;
-  /** «Мои столы»: photos of desks with their markup (export onto a photo). */
+  /** «Мои столы»: whole exports onto photos — markup and settings (export onto a photo). */
   desks!: EntityTable<SavedDesk, 'id'>;
+  /** The pictures and masks of the desks' photos. */
+  deskPhotos!: EntityTable<DeskPhotoRow, 'id'>;
+  /** «Бланки»: printed task sheets the documents are written on (see blank/blank.ts). */
+  blanks!: EntityTable<Blank, 'id'>;
 
   constructor() {
     super('handbook');
@@ -23,6 +29,25 @@ class HandbookDB extends Dexie {
       settings: 'key',
     });
     this.version(2).stores({ desks: 'id, updatedAt' });
+    // 0.5.5: a desk keeps all the photos of an export and all its settings; the old ones become desks of one photo.
+    this.version(3)
+      .stores({ deskPhotos: 'id, deskId' })
+      .upgrade(async (tx) => {
+        const setting = async (key: string) => ((await tx.table('settings').get(key)) as SettingRow | undefined)?.value as object | undefined;
+        const base = { sheet: await setting('desk.sheet'), look: await setting('desk.ink') };
+        const desks: SavedDesk[] = [];
+        const rows: DeskPhotoRow[] = [];
+        for (const d of (await tx.table('desks').toArray()) as object[]) {
+          if (!isOldDesk(d)) continue;
+          const { desk, row } = fromOld(d, base);
+          desks.push(desk);
+          rows.push(row);
+        }
+        await tx.table('desks').bulkPut(desks);
+        await tx.table('deskPhotos').bulkPut(rows);
+      });
+    // 0.7.0: a document may be written on a blank.
+    this.version(4).stores({ blanks: 'id' });
   }
 }
 
@@ -46,15 +71,35 @@ export async function setSetting(key: string, value: unknown) {
   await db.settings.put({ key, value });
 }
 
+/** What new documents start with («Сохранить по умолчанию» in the menus); none saved: the built-in setup. */
+const PAGE_DEFAULTS = 'pageDefaults';
+
+export const pageDefaults = () => getSetting<Partial<PageSetup> | null>(PAGE_DEFAULTS, null);
+
+/** Saves these parts of a page setup for new documents (the rest saved before stays). */
+export async function savePageDefaults(part: Partial<PageSetup>) {
+  await setSetting(PAGE_DEFAULTS, { ...(await pageDefaults()), ...part });
+}
+
+/** Forgets these parts: new documents take them built-in again. */
+export async function forgetPageDefaults(keys: (keyof PageSetup)[]) {
+  const rest: Partial<PageSetup> = { ...(await pageDefaults()) };
+  for (const k of keys) delete rest[k];
+  await setSetting(PAGE_DEFAULTS, Object.keys(rest).length ? rest : null);
+}
+
 export async function createDocument(
   title = 'Без названия',
   content: DocContent = { type: 'doc', content: [{ type: 'paragraph' }] },
 ): Promise<HandDocument> {
   const now = Date.now();
+  // A blank and the first sheet's number belong to one document, never to new ones.
+  const { blank: _b, firstNumber: _f, ...page } = (await pageDefaults()) ?? {};
   const doc: HandDocument = {
     id: uid(),
     title,
     content,
+    ...(Object.keys(page).length ? { page } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -89,9 +134,11 @@ export interface FullBackup {
   settings: SettingRow[];
   /** «Мои столы», when asked for (photos make the file large). */
   desks?: unknown[];
+  /** The documents' blanks (pictures as data URLs): a document without its blank loses its sheet. */
+  blanks?: unknown[];
 }
 
-export async function exportEverything(desks?: unknown[]): Promise<FullBackup> {
+export async function exportEverything(desks?: unknown[], blanks?: unknown[]): Promise<FullBackup> {
   return {
     format: 'handbook-backup',
     version: 1,
@@ -100,6 +147,7 @@ export async function exportEverything(desks?: unknown[]): Promise<FullBackup> {
     documents: await db.documents.toArray(),
     settings: await db.settings.toArray(),
     ...(desks ? { desks } : {}),
+    ...(blanks?.length ? { blanks } : {}),
   };
 }
 
