@@ -262,7 +262,7 @@ fn fit_group(indexed: &[(usize, &Prepared)]) -> GroupModel {
             .collect();
         let (values, vectors) = jacobi_eigen(gram);
         let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| values[b].partial_cmp(&values[a]).unwrap());
+        order.sort_by(|&a, &b| values[b].total_cmp(&values[a]));
         let top = values[order[0]].max(0.0);
         for &k in order.iter().take(MAX_COMPONENTS) {
             let lambda = values[k];

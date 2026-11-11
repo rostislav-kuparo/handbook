@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 import { DEFAULT_DRAW_PEN, drawPenOf, type DrawPen } from '../editor/page';
 import type { Deal } from '../engine/client';
 import { useHandwriting } from '../engine/handwriting';
+import { pointsKey } from './pointInk';
 import { aroundOnSheet, drawingSvg, drawSketch, linesOnly, penFor, sketchLayout, type Drawing, type SheetMap } from './render';
 
 /** The document's drawing pen (a drawing's own choice goes over it). */
@@ -38,6 +39,7 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder, deal, sh
   const { style, fontVersion } = useHandwriting();
   const docPen = useContext(DrawPenContext);
   const draw = drawPenOf(docPen, pen);
+  const inkKey = pointsKey();
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -59,7 +61,7 @@ export function SketchFigure({ code, pen, fontSize, width, placeholder, deal, sh
     () => (w > 40 ? sketchLayout(code, w, fs, penFor(style, fs, draw)) : null),
     // The pen's parts, not the object (it is rebuilt on every render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [code, w, fs, style, draw.tool, draw.weight, draw.wobble, draw.pressure, draw.overshoot, draw.points, draw.joins, draw.compass],
+    [code, w, fs, style, draw.tool, draw.weight, draw.wobble, draw.pressure, draw.overshoot, draw.points, draw.joins, draw.compass, inkKey],
   );
 
   const [drawing, setDrawing] = useState<Drawing | null>(null);

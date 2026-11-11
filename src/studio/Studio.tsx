@@ -4,8 +4,10 @@ import { addSample, deleteSample, updateSample, useHandwriting } from '../engine
 import { TEX_CHARS } from '../editor/tex';
 import { CHAR_GROUPS, isLetter, isPair, pairShelf, PANGRAM, shelfOf, SUGGESTED_PAIRS, type CharGroup, type Shelf } from '../model/alphabet';
 import { detectAnchors } from '../model/anchors';
+import { isPointSign, POINT_SIGNS } from '../model/points';
 import { BRACKETS, SYMBOL_GROUPS } from '../model/symbols';
 import { Stroke, uid } from '../model/types';
+import { SketchFigure } from '../sketch/SketchFigure';
 import { getSetting, setSetting } from '../storage/db';
 import { CaptureCanvas } from './CaptureCanvas';
 import { PhraseStudio } from './PhraseStudio';
@@ -22,6 +24,20 @@ const KNOWN = new Set(CHAR_GROUPS.flatMap((g) => g.chars));
 function extraSigns(written: Iterable<string>): string[] {
   const all = [...SYMBOL_GROUPS.flatMap((g) => [...g.chars]), ...TEX_CHARS, ...BRACKETS, ...[...written].filter((k) => !isPair(k))];
   return [...new Set(all)].filter((c) => !KNOWN.has(c) && c.trim() !== '');
+}
+
+/** A small drawing with six points of this kind, to see the variants among lines. */
+function pointDemo(sign: string): string {
+  const style = POINT_SIGNS.indexOf(sign as (typeof POINT_SIGNS)[number]);
+  const points = { A: [0, 0], B: [2, 2.6], C: [5, 3], D: [8, 2.2], E: [7, 0.2], F: [3.6, 0.8] };
+  const names = Object.keys(points);
+  return [
+    ...Object.entries(points).map(([n, [x, y]]) => `${n} = (${x}, ${y})`),
+    ...names.map((n, i) => `Segment(${n}, ${names[(i + 1) % names.length]})`),
+    'Segment(B, F)',
+    'Segment(C, E)',
+    ...names.map((n) => `SetPointStyle(${n}, ${style})`),
+  ].join('\n');
 }
 
 /** How far a group is: a thin bar that fills when every sign has three variants. */
@@ -97,8 +113,10 @@ export function Studio() {
     const twin = next.endsWith('upper') ? current.toUpperCase() : current.toLowerCase();
     open(chars.includes(twin) ? twin : chars[0]);
   };
-  const script = shelf === 'sym' ? 'sym' : shelf.slice(0, 3);
+  const caseless = shelf === 'sym' || shelf === 'points';
+  const script = caseless ? shelf : shelf.slice(0, 3);
   const upper = shelf.endsWith('upper');
+  const point = isPointSign(current);
 
   const move = useCallback(
     (delta: number) => {
@@ -121,7 +139,8 @@ export function Studio() {
 
   const save = useCallback(
     (strokes: Stroke[], pointerType: string) => {
-      const { entry, exit } = detectAnchors(current, strokes);
+      // A point of a drawing joins nothing.
+      const { entry, exit } = isPointSign(current) ? { entry: null, exit: null } : detectAnchors(current, strokes);
       void addSample({ id: uid(), char: current, strokes, entry, exit, pointerType, createdAt: Date.now() });
     },
     [current],
@@ -188,10 +207,10 @@ export function Studio() {
         </div>
         <div className="alphabet-pills">
           <div className="pill float" role="group" aria-label="Регистр">
-            <button className={!upper ? 'on' : ''} disabled={script === 'sym'} onClick={() => pickShelf(`${script}-lower` as Shelf)} title="Строчные">
+            <button className={!upper ? 'on' : ''} disabled={caseless} onClick={() => pickShelf(`${script}-lower` as Shelf)} title="Строчные">
               {lower}
             </button>
-            <button className={upper ? 'on' : ''} disabled={script === 'sym'} onClick={() => pickShelf(`${script}-upper` as Shelf)} title="Прописные">
+            <button className={upper ? 'on' : ''} disabled={caseless} onClick={() => pickShelf(`${script}-upper` as Shelf)} title="Прописные">
               {lower.toUpperCase()}
             </button>
           </div>
@@ -204,6 +223,9 @@ export function Studio() {
             </button>
             <button className={script === 'sym' ? 'on' : ''} onClick={() => pickShelf('sym')} title="Цифры, знаки и формулы">
               ∑
+            </button>
+            <button className={script === 'points' ? 'on' : ''} onClick={() => pickShelf('points')} title="Точки чертежа: свои варианты кружков, крестиков и точек">
+              ○
             </button>
           </div>
         </div>
@@ -241,6 +263,7 @@ export function Studio() {
               char={current}
               penWidth={style.weight}
               onSave={save}
+              pointSign={point}
               extra={
                 <span className="letter-arrows">
                   <button className="btn ghost" onClick={() => move(-1)} aria-label="Предыдущая буква" title="Предыдущая буква (←)">
@@ -272,10 +295,23 @@ export function Studio() {
               </div>
             </section>
 
-            <section className="variants">
-              <h3>Так движок пишет {isPair(current) ? 'эту пару' : 'эту букву'}</h3>
-              <SynthPreview char={current} />
-            </section>
+            {point ? (
+              <section className="variants">
+                <h3>Так выйдет на чертеже</h3>
+                <p className="muted small">
+                  Рисуйте вокруг перекрестия — это само место точки. Размер как на бумаге рядом с буквами, пунктир — обычный размер. Каждая точка чертежа берёт один из вариантов, пока их нет — рисует
+                  программа.
+                </p>
+                <div className="point-demo">
+                  <SketchFigure code={pointDemo(current)} fontSize={26} />
+                </div>
+              </section>
+            ) : (
+              <section className="variants">
+                <h3>Так движок пишет {isPair(current) ? 'эту пару' : 'эту букву'}</h3>
+                <SynthPreview char={current} />
+              </section>
+            )}
           </>
         )}
       </section>

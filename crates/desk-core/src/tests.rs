@@ -362,7 +362,12 @@ fn curved_notebook(bulge: [[f64; 4]; 4], sag: f64) -> (Scene, Warp) {
             grid.d[j * 5 + i] = [0.0, sag * (std::f64::consts::PI * i as f64 / 4.0).sin() * (std::f64::consts::PI * j as f64 / 6.0).sin()];
         }
     }
-    let truth = Warp { corners: BIG, bulge: Some(bulge), grid: Some(grid) };
+    notebook_bent(bulge, grid)
+}
+
+/// The same with any grid of corrections.
+fn notebook_bent(bulge: [[f64; 4]; 4], grid: crate::warp::Grid) -> (Scene, Warp) {
+    let truth = Warp { corners: BIG, bulge: Some(bulge), bows: None, grid: Some(grid) };
     let m = truth.map();
     let mut outline = Vec::new();
     for k in 0..4 {
@@ -408,11 +413,64 @@ fn follows_curved_edges() {
     assert!(worst(&c.corners, &BIG) < 0.5, "{:?}", c.corners);
     for k in 0..4 {
         for t in [0.25, 0.5, 0.75] {
-            let (got, want) = (crate::warp::poly(&c.bulge[k], t), crate::warp::poly(&bulge[k], t));
+            let (got, want) = (c.bows[k].curve().at(t), crate::warp::poly(&bulge[k], t));
             assert!((got - want).abs() < 0.5, "side {k} at {t}: {got} vs {want}");
         }
     }
     assert!((c.max - 4.0).abs() < 0.5, "max {}", c.max);
+}
+
+#[test]
+fn follows_wavy_edges_knot_by_knot() {
+    // A sheet whose sides wave (two or three waves, up to 3 px): one cubic per side could not follow them.
+    let wave = |k: usize, t: f64| [3.0, 2.5, 3.0, 0.0][k] * (t * std::f64::consts::PI * [5.0, 4.0, 6.0, 1.0][k]).sin() * (t * std::f64::consts::PI).sin();
+    let mut outline = Vec::new();
+    for k in 0..4 {
+        let (a, b) = (BIG[k], BIG[(k + 1) % 4]);
+        let l = crate::quad::Line::through(a, b);
+        let n = l.normal();
+        for i in 0..400 {
+            let t = i as f64 / 400.0;
+            let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            let m = wave(k, t);
+            outline.push([p[0] + n[0] * m, p[1] + n[1] * m]);
+        }
+    }
+    let mut s = Scene::new(1400, 1650, BIG);
+    s.ss = 2;
+    s.sigma = 0.8;
+    s.noise = (1e-4, 5e-6);
+    s.outline = Some(outline);
+    let photo = s.render();
+    let c = edges::curved_sides(&photo, [[203.0, 147.0], [1147.0, 193.0], [1203.0, 1497.0], [157.0, 1463.0]]);
+    assert!(c.fitted[..3].iter().all(|&f| f), "{:?}", c.fitted);
+    for k in 0..3 {
+        let curve = c.bows[k].curve();
+        let worst = (2..=98).map(|i| i as f64 / 100.0).map(|t| (curve.at(t) - wave(k, t)).abs()).fold(0.0, f64::max);
+        // The edge points themselves scatter by about 0.3 px here; one arc per side would be 2–3 px off.
+        assert!(worst < 0.8 && c.bows[k].t.len() > 5, "side {k}: off by {worst} px with {} knots", c.bows[k].t.len());
+    }
+}
+
+#[test]
+fn a_small_fold_gets_a_finer_grid() {
+    // A bump 5 px high and about 40 mm across: a 5×7 grid (nodes 50 mm apart) cannot follow it.
+    let (nx, ny) = (33, 49);
+    let mut grid = crate::warp::Grid::zero(nx, ny);
+    for j in 0..ny {
+        for i in 0..nx {
+            let (u, v) = (i as f64 / (nx - 1) as f64, j as f64 / (ny - 1) as f64);
+            grid.d[j * nx + i] = [0.0, 5.0 * (-((u - 0.45).powi(2) + (v - 0.4).powi(2)) / (2.0 * 0.07f64.powi(2))).exp()];
+        }
+    }
+    let (s, _) = notebook_bent([[0.0; 4]; 4], grid);
+    let photo = s.render();
+    let warp = Warp::flat(BIG);
+    let r = ruling::detect(&photo, &warp, A4_MM.0, A4_MM.1).expect("ruling");
+    let coarse = ruling::bend(&photo, &warp, A4_MM.0, A4_MM.1, r.step, r.offset, r.slope, 5, 7);
+    let auto = ruling::bend_auto(&photo, &warp, A4_MM.0, A4_MM.1, r.step, r.offset, r.slope);
+    assert!(auto.grid.nx > 5, "stayed {}×{}: {} → {} mm", auto.grid.nx, auto.grid.ny, coarse.before, coarse.after);
+    assert!(auto.after < 0.6 * coarse.after, "5×7: {} mm, {}×{}: {} mm", coarse.after, auto.grid.nx, auto.grid.ny, auto.after);
 }
 
 #[test]
@@ -422,7 +480,7 @@ fn straightens_a_sagging_page_by_its_lines() {
     let photo = s.render();
     // As the dialog does it: curved edges, the lines, then the bend from the lines.
     let c = edges::curved_sides(&photo, BIG);
-    let warp = Warp { corners: c.corners, bulge: Some(c.bulge), grid: None };
+    let warp = Warp { corners: c.corners, bulge: None, bows: Some(c.bows), grid: None };
     let r = ruling::detect(&photo, &warp, A4_MM.0, A4_MM.1).expect("ruling");
     let b = ruling::bend(&photo, &warp, A4_MM.0, A4_MM.1, r.step, r.offset, r.slope, 5, 7);
     assert!(b.before > 0.4, "the page sags: {} mm", b.before);

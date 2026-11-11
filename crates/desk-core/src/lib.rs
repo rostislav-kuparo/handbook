@@ -8,6 +8,7 @@
 //! notebook's printed lines and the things lying on the sheet, and how the
 //! phone was held over it.
 
+mod bow;
 mod calib;
 mod edges;
 mod img;
@@ -134,11 +135,11 @@ pub struct Measure {
 pub fn measure(photo: &Photo, corners: &[Pt; 4], on: [bool; 4]) -> Measure {
     let blurs: Vec<Option<edges::EdgeBlur>> = (0..4).map(|k| if on[k] { edges::edge_blur(photo, corners[k], corners[(k + 1) % 4]) } else { None }).collect();
     let mut sig: Vec<f64> = blurs.iter().flatten().map(|b| b.sigma).collect();
-    sig.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sig.sort_by(|a, b| a.total_cmp(b));
     let reliable = sig.len() >= 2;
     let sigma = reliable.then(|| sig[sig.len() / 2]);
     let mut amounts: Vec<f64> = blurs.iter().flatten().map(|b| b.sharpen).collect();
-    amounts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    amounts.sort_by(|a, b| a.total_cmp(b));
     // A phone rarely sharpens more than this; more means the edges misled.
     let sharpen = if reliable { amounts[amounts.len() / 2].min(1.5) } else { 0.0 };
     Measure {
@@ -210,7 +211,7 @@ impl Desk {
         Ok(serde_json::to_string(&calib::calibrate(&self.photo, x, y, radius, sigma))?)
     }
 
-    /// The printed lines of a `w_mm`×`h_mm` sheet laid out by `warp` (JSON `{ corners, bulge?, grid? }`):
+    /// The printed lines of a `w_mm`×`h_mm` sheet laid out by `warp` (JSON `{ corners, bows?, bulge?, grid? }`):
     /// `{ kind, step, colStep, offset, slope, colOffset, margins: { left, right, top, bottom }, strength }` (mm) or `null`.
     pub fn ruling(&self, warp: &str, w_mm: f64, h_mm: f64) -> Result<String, JsError> {
         let warp: warp::Warp = serde_json::from_str(warp)?;
@@ -223,7 +224,15 @@ impl Desk {
         Ok(serde_json::to_string(&perspective::find(&self.photo, focal))?)
     }
 
-    /// The sheet's edges as curves: `{ corners, bulge, max, fitted }`.
+    /// Where the sheet's edge is near the fraction `t` of the side from `a` to `b` (JSON points):
+    /// px from the side along its outward normal, or `null`.
+    #[wasm_bindgen(js_name = edgeOffset)]
+    pub fn edge_offset(&self, a: &str, b: &str, t: f64) -> Result<String, JsError> {
+        let (a, b): (Pt, Pt) = (serde_json::from_str(a)?, serde_json::from_str(b)?);
+        Ok(serde_json::to_string(&edges::edge_offset(&self.photo, a, b, t))?)
+    }
+
+    /// The sheet's edges as curves: `{ corners, bows, max, fitted }`.
     #[wasm_bindgen(js_name = curvedSides)]
     pub fn curved_sides(&self, corners: &str) -> Result<String, JsError> {
         Ok(serde_json::to_string(&edges::curved_sides(&self.photo, corners_of(corners)?))?)
@@ -231,10 +240,16 @@ impl Desk {
 
     /// A curved sheet straightened by its printed lines (step, offset, slope from `ruling`):
     /// `{ grid: { nx, ny, d }, before, after }` — the corrections and how far the lines strayed (mm).
+    /// `nx` 0: the grid as fine as the sheet needs.
     #[allow(clippy::too_many_arguments)]
     pub fn bend(&self, warp: &str, w_mm: f64, h_mm: f64, step: f64, offset: f64, slope: f64, nx: u32, ny: u32) -> Result<String, JsError> {
         let warp: warp::Warp = serde_json::from_str(warp)?;
-        let b = ruling::bend(&self.photo, &warp, w_mm, h_mm, step, offset, slope, nx.max(2) as usize, ny.max(2) as usize);
+        // No grid size given: as fine as the sheet needs.
+        let b = if nx == 0 {
+            ruling::bend_auto(&self.photo, &warp, w_mm, h_mm, step, offset, slope)
+        } else {
+            ruling::bend(&self.photo, &warp, w_mm, h_mm, step, offset, slope, nx.max(2) as usize, ny.max(2) as usize)
+        };
         Ok(serde_json::to_string(&b)?)
     }
 

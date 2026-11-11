@@ -135,22 +135,28 @@ let started = false;
 export function startHandwriting() {
   if (started) return;
   started = true;
-  void loadStyle().then((style) => {
-    set({ style });
-    liveQuery(() => db.samples.orderBy('createdAt').toArray()).subscribe({
-      next: (samples) => {
-        const byChar = new Map<string, Sample[]>();
-        for (const s of samples) {
-          const list = byChar.get(s.char);
-          if (list) list.push(s);
-          else byChar.set(s.char, [s]);
-        }
-        set({ samples, byChar, loaded: true });
-        scheduleRebuild(state.fontVersion === 0 ? 0 : 200);
-      },
-      error: (err) => set({ error: String(err) }),
+  // A style that cannot be read must not keep the letters from loading: the built-in one serves.
+  void loadStyle()
+    .catch((err) => {
+      console.error(err);
+      return state.style;
+    })
+    .then((style) => {
+      set({ style });
+      liveQuery(() => db.samples.orderBy('createdAt').toArray()).subscribe({
+        next: (samples) => {
+          const byChar = new Map<string, Sample[]>();
+          for (const s of samples) {
+            const list = byChar.get(s.char);
+            if (list) list.push(s);
+            else byChar.set(s.char, [s]);
+          }
+          set({ samples, byChar, loaded: true });
+          scheduleRebuild(state.fontVersion === 0 ? 0 : 200);
+        },
+        error: (err) => set({ error: String(err) }),
+      });
     });
-  });
 }
 
 // ---------------------------------------------------------------- actions

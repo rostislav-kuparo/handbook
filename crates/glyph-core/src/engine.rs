@@ -299,7 +299,7 @@ impl EngineCore {
         let top = |p: &Prepared| strokes_bbox(&p.strokes).y_max;
         let width = |p: &Prepared| strokes_bbox(&p.strokes).width();
         let median = |v: &mut Vec<f64>| {
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v.sort_by(|a, b| a.total_cmp(b));
             v[v.len() / 2]
         };
         if key.chars().count() < 2 {
@@ -1586,7 +1586,7 @@ mod tests {
         let items = e.word_items(&chars, 1, &HashMap::new(), &mut vec![], &[], &mut Deal::default());
         let (a, b) = (&items[0], &items[1]);
         let mut radii: Vec<f64> = a.skel.iter().flatten().map(|q| q[2]).collect();
-        radii.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        radii.sort_by(|x, y| x.total_cmp(y));
         let median = radii[radii.len() / 2];
         let leaves = a.skel[0].last().unwrap()[2];
         assert!(leaves > 0.92 * median, "the first «м» ends without thinning: {leaves} vs {median}");

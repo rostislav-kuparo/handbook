@@ -153,10 +153,10 @@ pub fn measure_noise(photo: &Photo, corners: &[Pt; 4]) -> Option<Noise> {
 
     // The cleaner half of the paper (least ruling, fibres, dirt) describes the noise itself.
     let mut by_var: Vec<usize> = (0..tiles.len()).collect();
-    by_var.sort_by(|&i, &j| tiles[i].var[1].partial_cmp(&tiles[j].var[1]).unwrap());
+    by_var.sort_by(|&i, &j| tiles[i].var[1].total_cmp(&tiles[j].var[1]));
     let clean = &by_var[..by_var.len() / 2];
     let median = |mut v: Vec<f64>| {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         v[v.len() / 2]
     };
     let rho = median(clean.iter().map(|&i| tiles[i].rho).collect()).clamp(0.0, 1.0);
@@ -185,7 +185,7 @@ pub fn measure_noise(photo: &Photo, corners: &[Pt; 4]) -> Option<Noise> {
             if sel.len() < 5 {
                 continue;
             }
-            sel.sort_by(|x, y| x.var[c].partial_cmp(&y.var[c]).unwrap());
+            sel.sort_by(|x, y| x.var[c].total_cmp(&y.var[c]));
             let at = sel.len() * 3 / 10;
             let l = sel.iter().map(|t| t.mean[c]).sum::<f64>() / sel.len() as f64;
             pts.push((l, sel[at].var[c] / q, sel.len() as f64));

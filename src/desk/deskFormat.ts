@@ -8,6 +8,7 @@ import type { Angles } from './camera';
 import type { InkLook } from './compose';
 import type { Pt } from './homography';
 import type { FitMode } from './inkLayer';
+import type { Bow } from './bow';
 import type { Grid } from './warp';
 
 /** The paper of a desk: one of the formats, or «свой» (`custom`, mm). */
@@ -15,7 +16,10 @@ export type DeskFormat = SheetKind | 'custom';
 
 /** A curved sheet: how its sides bow, the grid of corrections, and whether the grid came from the printed lines or by hand. */
 export interface DeskBend {
-  bulge: number[][];
+  /** How the sides bow, as kept before `bows`: a cubic per side. */
+  bulge?: number[][];
+  /** How the sides bow: a spline per side, its knots as many as the edge needs. */
+  bows?: Bow[];
   grid: Grid;
   /** The grid was fitted to the printed lines, or moved by hand: do not fit it again. */
   fixed: boolean;
@@ -81,6 +85,8 @@ export interface SavedPhoto {
   handTilt?: Angles | null;
   /** The lines it was set by: two across the sheet, two down it ([ax, ay, bx, by]). */
   handLines?: number[][] | null;
+  /** What of the photo is saved: left, top, right, bottom, px; null or missing: all of it. */
+  crop?: [number, number, number, number] | null;
   /** Missing: found anew when opened. */
   found?: PhotoFindings;
 }

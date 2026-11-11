@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::bow::{Bow, Spline};
 use crate::quad::{apply, dist, square_to_quad, Line, Mat3, Pt};
 
 /// Corrections at grid nodes, photo px; nodes run row by row, `nx` across, `ny` down.
@@ -18,6 +19,15 @@ pub struct Grid {
 impl Grid {
     pub fn zero(nx: usize, ny: usize) -> Grid {
         Grid { nx, ny, d: vec![[0.0, 0.0]; nx * ny] }
+    }
+
+    /// The same corrections on a grid of `nx`×`ny` nodes (read off this one between its nodes).
+    pub fn resample(&self, nx: usize, ny: usize) -> Grid {
+        let d = (0..ny)
+            .flat_map(|j| (0..nx).map(move |i| (i as f64 / (nx - 1) as f64, j as f64 / (ny - 1) as f64)))
+            .map(|(u, v)| self.at(u, v))
+            .collect();
+        Grid { nx, ny, d }
     }
 
     /// Catmull-Rom interpolation between the nodes (passes through them).
@@ -62,6 +72,9 @@ pub struct Warp {
     /// along the outward normal, zero at both ends.
     #[serde(default)]
     pub bulge: Option<[[f64; 4]; 4]>,
+    /// The same as splines with as many knots as each side needs (wins over `bulge`).
+    #[serde(default)]
+    pub bows: Option<[Bow; 4]>,
     #[serde(default)]
     pub grid: Option<Grid>,
 }
@@ -70,14 +83,14 @@ pub struct Warp {
 pub struct WarpMap {
     h: Mat3,
     sides: [(Line, f64); 4],
-    bulge: Option<[[f64; 4]; 4]>,
+    bow: Option<[Spline; 4]>,
     grid: Option<Grid>,
 }
 
 impl Warp {
     #[cfg(test)]
     pub fn flat(corners: [Pt; 4]) -> Warp {
-        Warp { corners, bulge: None, grid: None }
+        Warp { corners, bulge: None, bows: None, grid: None }
     }
 
     pub fn map(&self) -> WarpMap {
@@ -85,7 +98,16 @@ impl Warp {
         WarpMap {
             h: square_to_quad(&c),
             sides: std::array::from_fn(|k| (Line::through(c[k], c[(k + 1) % 4]), dist(c[k], c[(k + 1) % 4]).max(1e-9))),
-            bulge: self.bulge,
+            bow: match (&self.bows, &self.bulge) {
+                (Some(b), _) => Some(std::array::from_fn(|k| b[k].curve())),
+                // A cubic as a spline: through it at many knots (the curve between them is off by far less than a px).
+                (None, Some(c)) => Some(std::array::from_fn(|k| {
+                    let t: Vec<f64> = (0..=16).map(|i| i as f64 / 16.0).collect();
+                    let d: Vec<f64> = t.iter().map(|&x| poly(&c[k], x)).collect();
+                    Spline::new(&t, &d)
+                })),
+                _ => None,
+            },
             grid: self.grid.clone(),
         }
     }
@@ -95,12 +117,12 @@ impl WarpMap {
     /// The photo point of sheet point (u, v), both 0..1.
     pub fn at(&self, u: f64, v: f64) -> Pt {
         let mut p = apply(&self.h, [u, v]);
-        if let Some(b) = &self.bulge {
+        if let Some(b) = &self.bow {
             // Each side's bow at the point of the side level with (u, v), blended across the sheet.
             let side = |k: usize, q: Pt| {
                 let (l, len) = &self.sides[k];
                 let t = (((q[0] - l.p[0]) * l.d[0] + (q[1] - l.p[1]) * l.d[1]) / len).clamp(0.0, 1.0);
-                let m = poly(&b[k], t);
+                let m = b[k].at(t);
                 let n = l.normal();
                 [n[0] * m, n[1] * m]
             };
@@ -132,13 +154,13 @@ mod tests {
         assert!(dist(flat.at(1.0, 1.0), q[2]) < 1e-9);
         let mut g = Grid::zero(5, 7);
         g.d[2 * 5 + 3] = [4.0, -2.0];
-        let w = Warp { corners: q, bulge: None, grid: Some(g) }.map();
+        let w = Warp { corners: q, bulge: None, bows: None, grid: Some(g) }.map();
         let (u, v) = (3.0 / 4.0, 2.0 / 6.0);
         let moved = w.at(u, v);
         let base = flat.at(u, v);
         assert!(dist(moved, [base[0] + 4.0, base[1] - 2.0]) < 1e-9);
         // Bulges are zero at the corners.
-        let b = Warp { corners: q, bulge: Some([[0.0, 8.0, -8.0, 0.0]; 4]), grid: None }.map();
+        let b = Warp { corners: q, bulge: Some([[0.0, 8.0, -8.0, 0.0]; 4]), bows: None, grid: None }.map();
         for (k, (u, v)) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].into_iter().enumerate() {
             assert!(dist(b.at(u, v), q[k]) < 1e-9);
         }

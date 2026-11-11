@@ -106,7 +106,7 @@ fn darkness(v: &[f64], win: usize) -> Vec<f64> {
         .map(|i| {
             let (a, b) = (i.saturating_sub(win / 2), (i + win / 2 + 1).min(n));
             let mut s: Vec<f64> = v[a..b].to_vec();
-            s.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            s.sort_by(|x, y| x.total_cmp(y));
             let med = s[s.len() / 2].max(1e-6);
             1.0 - v[i] / med
         })
@@ -278,7 +278,7 @@ fn margin_candidates(flat: &Flat, ink: &[f32], slope: f64, vertical: bool) -> (V
     // spiral's holes next to the margin are not lines); with no lines this way, a trace.
     let local = |i: usize| {
         let mut near: Vec<f64> = peaks.iter().filter(|&&j| j != i && j.abs_diff(i) <= around && thin(j)).map(|&j| dark[j]).collect();
-        near.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        near.sort_by(|a, b| a.total_cmp(b));
         near.get(near.len() * 3 / 4).copied().unwrap_or(0.0).max(0.01)
     };
     let lines = (3..n - 3)
@@ -392,7 +392,7 @@ pub(crate) fn line_residuals(photo: &Photo, warp: &WarpMap, w_mm: f64, h_mm: f64
                 })
                 .collect();
             let mut sorted = prof.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let paper = sorted[sorted.len() * 3 / 4].max(1e-6);
             let d: Vec<f64> = prof.iter().map(|v| 1.0 - v / paper).collect();
             let (im, dm) = d.iter().enumerate().fold((0, f64::NEG_INFINITY), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
@@ -423,7 +423,7 @@ fn without_plane(m: &mut [(f64, f64, f64)]) {
         }
     }
     for col in 0..3 {
-        let Some(piv) = (col..3).max_by(|&i, &j| a[i][col].abs().partial_cmp(&a[j][col].abs()).unwrap()) else { return };
+        let Some(piv) = (col..3).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs())) else { return };
         if a[piv][col].abs() < 1e-12 {
             return;
         }
@@ -451,9 +451,41 @@ pub struct Bend {
     pub after: f64,
 }
 
+/// The grids `bend_auto` tries, coarse to fine.
+const GRIDS: [(usize, usize); 3] = [(5, 7), (9, 13), (17, 25)];
+
+/// `bend` on as fine a grid as the sheet needs: 5×7 first, then twice and
+/// four times as dense while the lines still stray visibly (over 0.1 mm),
+/// that straightens them clearly more (by 15 % and 0.02 mm) and two printed
+/// lines at least lie between the rows of nodes — a node with no line near it
+/// has nothing to go by. The finer grids keep their rim: the sheet's edges are
+/// measured on the edges themselves, and near them lines are few.
+pub fn bend_auto(photo: &Photo, warp: &Warp, w_mm: f64, h_mm: f64, step: f64, offset: f64, slope: f64) -> Bend {
+    let (nx, ny) = GRIDS[0];
+    let mut best = bend(photo, warp, w_mm, h_mm, step, offset, slope, nx, ny);
+    for &(nx, ny) in &GRIDS[1..] {
+        if h_mm / ((ny - 1) as f64) < 2.0 * step || !(best.after > 0.1) {
+            break;
+        }
+        let start = Warp { grid: Some(best.grid.resample(nx, ny)), ..warp.clone() };
+        let finer = bend_rim(photo, &start, w_mm, h_mm, step, offset, slope, nx, ny, false);
+        if !(finer.after < 0.85 * best.after && finer.after < best.after - 0.02) {
+            break;
+        }
+        best = Bend { before: best.before, ..finer };
+    }
+    best
+}
+
 /// A curved sheet straightened by its own printed lines: wherever a line runs
 /// lower or higher than the ruling says, the warp is moved so it runs true.
 pub fn bend(photo: &Photo, warp: &Warp, w_mm: f64, h_mm: f64, step: f64, offset: f64, slope: f64, nx: usize, ny: usize) -> Bend {
+    bend_rim(photo, warp, w_mm, h_mm, step, offset, slope, nx, ny, true)
+}
+
+/// The same, moving the nodes on the grid's rim too, or not.
+#[allow(clippy::too_many_arguments)]
+fn bend_rim(photo: &Photo, warp: &Warp, w_mm: f64, h_mm: f64, step: f64, offset: f64, slope: f64, nx: usize, ny: usize, rim: bool) -> Bend {
     let mut cur = warp.clone();
     if cur.grid.as_ref().is_none_or(|g| g.nx != nx || g.ny != ny) {
         cur.grid = Some(Grid::zero(nx, ny));
@@ -478,6 +510,9 @@ pub fn bend(photo: &Photo, warp: &Warp, w_mm: f64, h_mm: f64, step: f64, offset:
         let mut grid = cur.grid.clone().unwrap();
         for j in 0..ny {
             for i in 0..nx {
+                if !rim && (i == 0 || j == 0 || i == nx - 1 || j == ny - 1) {
+                    continue;
+                }
                 let (u, v) = (i as f64 / (nx - 1) as f64, j as f64 / (ny - 1) as f64);
                 let (mut sw, mut sr) = (0.0, 0.0);
                 for &(mu, mv, r) in &m {

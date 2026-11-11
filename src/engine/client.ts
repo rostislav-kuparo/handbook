@@ -51,24 +51,69 @@ export interface EngineInfo {
   learned: Record<string, number>;
 }
 
-type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+type Pending = { req: EngineOp; resolve: (v: unknown) => void; reject: (e: Error) => void };
+type Reply = { id: number; ok: boolean; result?: unknown; error?: string; crashed?: boolean };
 
-const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 const pending = new Map<number, Pending>();
 let nextId = 1;
+/** What the engine was last given: a worker started after a crash gets it again (ids below zero). */
+const state: { style: EngineOp | null; samples: EngineOp | null } = { style: null, samples: null };
+const STYLE_ID = -1;
+const SAMPLES_ID = -2;
 
-worker.onmessage = (e: MessageEvent<{ id: number; ok: boolean; result?: unknown; error?: string }>) => {
-  const p = pending.get(e.data.id);
-  if (!p) return;
-  pending.delete(e.data.id);
-  if (e.data.ok) p.resolve(e.data.result);
-  else p.reject(new Error(e.data.error));
-};
+function failAll(error: Error) {
+  for (const p of pending.values()) p.reject(error);
+  pending.clear();
+}
+
+function spawn(): Worker {
+  const w = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  w.onmessage = (e: MessageEvent<Reply>) => {
+    // A worker already replaced may still have answers on their way.
+    if (w !== worker) return;
+    const { id, ok, result, error, crashed } = e.data;
+    const p = pending.get(id);
+    pending.delete(id);
+    if (crashed) restart(id, p?.req);
+    if (!p) return;
+    if (ok) p.resolve(result);
+    else p.reject(new Error(error));
+  };
+  // The worker itself failed (its script or the engine did not load): nothing waits for ever.
+  w.onerror = (e) => {
+    console.error('engine worker', e.message);
+    if (w === worker) failAll(new Error(e.message || 'Движок почерка не запустился'));
+  };
+  w.onmessageerror = () => {
+    if (w === worker) failAll(new Error('Движок почерка ответил непонятно'));
+  };
+  return w;
+}
+
+let worker = spawn();
+
+/**
+ * The engine crashed on the call `id`: after a crash it answers nothing, so a
+ * new worker takes over — with the style and samples of the old one, and the
+ * calls still waiting. What crashed it is not given again.
+ */
+function restart(id: number, culprit: EngineOp | undefined) {
+  console.error('engine crashed, restarting', culprit?.op ?? id);
+  if (id === STYLE_ID || culprit?.op === 'setStyle') state.style = null;
+  if (id === SAMPLES_ID || culprit?.op === 'setSamples') state.samples = null;
+  worker.terminate();
+  worker = spawn();
+  if (state.style) worker.postMessage({ id: STYLE_ID, req: state.style });
+  if (state.samples) worker.postMessage({ id: SAMPLES_ID, req: state.samples });
+  for (const [waiting, p] of pending) worker.postMessage({ id: waiting, req: p.req });
+}
 
 function call<T>(req: EngineOp): Promise<T> {
   const id = nextId++;
+  if (req.op === 'setStyle') state.style = req;
+  if (req.op === 'setSamples') state.samples = req;
   return new Promise<T>((resolve, reject) => {
-    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    pending.set(id, { req, resolve: resolve as (v: unknown) => void, reject });
     worker.postMessage({ id, req });
   });
 }

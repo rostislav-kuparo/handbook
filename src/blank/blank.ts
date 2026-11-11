@@ -171,6 +171,8 @@ export interface BlankPicture {
 }
 
 const pictures = new Map<string, Promise<BlankPicture>>();
+/** Pictures kept (the most recently asked for last): the open blank's, and the few whites tried last. The rest give their memory back. */
+const KEPT_PICTURES = 6;
 
 export function blankPicture(b: Blank): Promise<BlankPicture> {
   const key = `${b.id}|${b.white}`;
@@ -189,8 +191,18 @@ export function blankPicture(b: Blank): Promise<BlankPicture> {
       const blob = await canvas.convertToBlob({ type: 'image/png' });
       return { url: URL.createObjectURL(blob), dataUrl: await toDataUrl(blob) };
     })();
-    pictures.set(key, hit);
     hit.catch(() => pictures.delete(key));
+  }
+  // The most recently asked for last; the oldest beyond the few kept are let go.
+  pictures.delete(key);
+  pictures.set(key, hit);
+  for (const [old, pic] of pictures) {
+    if (pictures.size <= KEPT_PICTURES) break;
+    pictures.delete(old);
+    void pic.then(
+      (gone) => URL.revokeObjectURL(gone.url),
+      () => {},
+    );
   }
   return hit;
 }

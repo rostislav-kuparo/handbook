@@ -48,11 +48,46 @@ export interface PageExport {
   wear?: WearSettings | null;
 }
 
-/** A sheet's ink apart: its text, its drawings (ink-only SVGs) and the graphite rubbed onto it. */
+/**
+ * A sheet's ink apart: its text, its drawings (ink-only SVGs) and the graphite
+ * rubbed onto it — drawn when the sheet is shown: such a picture of every sheet
+ * at once would not fit in memory.
+ */
 export interface SheetLayers {
   text: string;
   drawings: string;
-  wear: HTMLCanvasElement | null;
+  wear: (() => HTMLCanvasElement) | null;
+}
+
+/** Paragraphs already written for this width: laying the same text out again takes them from here. */
+export interface ParagraphMemo {
+  stamp: string;
+  renders: Map<string, ParagraphRender>;
+}
+
+export const newMemo = (): ParagraphMemo => ({ stamp: '', renders: new Map() });
+
+/** A long run over a whole document, from outside. */
+export interface PagesRun {
+  /** Stops it between paragraphs (it ends with the signal's error): the engine serves its calls in turn, an unwanted run would hold up the next. */
+  signal?: AbortSignal;
+  /** How much of it is done, 0..1. */
+  onProgress?: (part: number) => void;
+  memo?: ParagraphMemo;
+}
+
+/** The share of a run the letters take: they are nearly all of the time, the sheets are put together in the rest. */
+const LETTERS_SHARE = 0.95;
+
+/** The letters' pen strokes as lines of the work: where the hand went too. */
+function withLetters(work: WorkMap, strokes: PenStroke[]): WorkMap {
+  const lines = [...work.lines];
+  for (const st of strokes) {
+    const pts: { x: number; y: number }[] = [];
+    for (let k = 0; k + 1 < st.pts.length; k += 4) pts.push({ x: st.pts[k], y: st.pts[k + 1] });
+    if (pts.length > 1) lines.push({ pts, kind: 'letter' });
+  }
+  return { ...work, lines };
 }
 
 /**
@@ -140,7 +175,8 @@ function blockFrame(x: number, y: number, w: number, h: number, title: string): 
  * `pitch`: the lines (and blocks) go this far apart instead of the line
  * height, the letters keep their size — the same lines and sheets, spaced to
  * the printed lines of a real notebook. `drawings`: how the drawings go onto
- * such a sheet.
+ * such a sheet. `layers`: filled with each sheet's parts, which are then all
+ * there is: no whole sheets come back, and `work` holds the drawings' lines only.
  */
 export async function documentPages(
   o: PageExport,
@@ -151,7 +187,10 @@ export async function documentPages(
     drawings,
     work,
     layers,
-  }: { inkOnly?: boolean; strokes?: PenStroke[][]; pitch?: number; drawings?: DrawingFit; work?: WorkMap[]; layers?: SheetLayers[] } = {},
+    signal,
+    onProgress,
+    memo,
+  }: { inkOnly?: boolean; strokes?: PenStroke[][]; pitch?: number; drawings?: DrawingFit; work?: WorkMap[]; layers?: SheetLayers[] } & PagesRun = {},
 ): Promise<string[]> {
   // Where the letters and lines went is collected for the traces of work.
   const wear = o.wear?.on ? o.wear : null;
@@ -182,26 +221,39 @@ export async function documentPages(
   let deal: Deal | undefined;
   /** The deal each drawing's labels go on from (by its attributes). */
   const sketchDeals = new Map<unknown, Deal>();
+  // Another width or another kind of render: what is remembered is of no use.
+  const stamp = `${unitsWidth}|${collect}|${seed}`;
+  if (memo && memo.stamp !== stamp) {
+    memo.stamp = stamp;
+    memo.renders.clear();
+  }
+  // The engine's time goes by the letters.
+  const letters = runs.reduce((n, r) => n + (r?.text.length ?? 0) + 1, 0);
+  let written = 0;
   for (const [i, run] of runs.entries()) {
+    signal?.throwIfAborted();
     const a = nodes[i].attrs;
     if (a?.kind === 'sketch') {
       const pen = penFor(getHandwriting().style, sketchFs, drawPenOf(o.drawPen, a.pen));
       sketchDeals.set(a, deal ?? {});
       deal = await dealAfter(sketchLayout(String(a.code ?? ''), geo.contentW, sketchFs, pen), deal ?? {});
     }
-    const r = run
-      ? await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, {
-          scales: run.scales,
-          colors: run.colors,
-          shifts: run.shifts,
-          seen: seen[i],
-          skeleton: collect,
-          deal,
-          breaks: breaksOf(layout?.[i]),
-        })
-      : null;
-    if (r) deal = r.deal;
+    let r: ParagraphRender | null = null;
+    if (run) {
+      const styles = { scales: run.scales, colors: run.colors, shifts: run.shifts, seen: seen[i], skeleton: collect, deal, breaks: breaksOf(layout?.[i]) };
+      const key = memo ? JSON.stringify([run.text, styles]) : '';
+      r = memo?.renders.get(key) ?? null;
+      if (!r) {
+        r = await engine.renderParagraph(run.text, unitsWidth, LINE_HEIGHT_UNITS, seed, styles);
+        // The sheets take the ink by lines: the same ink in one piece need not be kept too.
+        r.d = '';
+        memo?.renders.set(key, r);
+      }
+      deal = r.deal;
+    }
     renders.push(r);
+    written += (run?.text.length ?? 0) + 1;
+    onProgress?.((LETTERS_SHARE * written) / letters);
   }
   const title = o.showTitle && o.title.trim() ? o.title : null;
   const titleInk = title
@@ -372,6 +424,7 @@ export async function documentPages(
 
   const out: string[] = [];
   for (let p = 0; p < pageCount; p++) {
+    signal?.throwIfAborted();
     const body: string[] = [];
     const bodyDraw: string[] = [];
     sheetStrokes = [];
@@ -407,12 +460,23 @@ export async function documentPages(
       o.firstNumber === null || inkOnly
         ? ''
         : `<text x="${sheetW / 2}" y="${sheetH - Math.min(28, geo.margin.bottom / 2.5) - 3}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#6b7390">${o.firstNumber + p}</text>`;
-    // The letters' pen strokes are where the hand went too.
-    for (const st of sheetStrokes) {
-      const pts: { x: number; y: number }[] = [];
-      for (let k = 0; k + 1 < st.pts.length; k += 4) pts.push({ x: st.pts[k], y: st.pts[k + 1] });
-      if (pts.length > 1) sheetWork.lines.push({ pts, kind: 'letter' });
+    const open = `<svg xmlns="http://www.w3.org/2000/svg" width="${sheetW}" height="${sheetH}" viewBox="0 0 ${sheetW} ${sheetH}">`;
+    const inText = (parts: string[]) => `<g transform="translate(${geo.margin.left} ${geo.margin.top})" font-family='${FALLBACK_FONTS}'>${parts.join('')}</g>`;
+    if (layers) {
+      const [done, inked] = [sheetWork, sheetStrokes];
+      work?.push(done);
+      strokes?.push(inked);
+      layers.push({
+        text: open + inText(body) + floating.join('') + '</svg>',
+        drawings: open + inText(bodyDraw) + floatDraw.join('') + '</svg>',
+        wear: wear && (() => wearCanvas(withLetters(done, inked), geo.sheet, WEAR_SCALE, wear, mix32(seed, p))),
+      });
+      onProgress?.(LETTERS_SHARE + ((1 - LETTERS_SHARE) * (p + 1)) / pageCount);
+      // Lets the page show how far it got, and a stop get through.
+      if (onProgress) await new Promise((go) => setTimeout(go));
+      continue;
     }
+    sheetWork = withLetters(sheetWork, sheetStrokes);
     work?.push(sheetWork);
     const full = (pic: HTMLCanvasElement) => `<image href="${pic.toDataURL('image/png')}" x="0" y="0" width="${sheetW}" height="${sheetH}" preserveAspectRatio="none"/>`;
     const rubbed = wear ? wearCanvas(sheetWork, geo.sheet, WEAR_SCALE, wear, mix32(seed, p)) : null;
@@ -420,8 +484,6 @@ export async function documentPages(
     // The creases' light (on a photo the GPU does it, with the shift).
     const relief = wear && !inkOnly ? reliefOf(geo.sheet, wear, mix32(seed, p), sheetWork.pivots) : null;
     const creases = relief && !relief.flat ? full(shadeOverlay(relief)) : '';
-    const open = `<svg xmlns="http://www.w3.org/2000/svg" width="${sheetW}" height="${sheetH}" viewBox="0 0 ${sheetW} ${sheetH}">`;
-    const inText = (parts: string[]) => `<g transform="translate(${geo.margin.left} ${geo.margin.top})" font-family='${FALLBACK_FONTS}'>${parts.join('')}</g>`;
     const text = show.text ? inText(body) + floating.join('') : '';
     const drawn = show.drawings ? inText(bodyDraw) + floatDraw.join('') : '';
     out.push(
@@ -433,7 +495,6 @@ export async function documentPages(
         text +
         `${number}</svg>`,
     );
-    layers?.push({ text: open + inText(body) + floating.join('') + '</svg>', drawings: open + inText(bodyDraw) + floatDraw.join('') + '</svg>', wear: rubbed });
     strokes?.push(sheetStrokes);
   }
   return out;

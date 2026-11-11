@@ -5,10 +5,22 @@ import type { CharStyles } from './client';
 import { FONT_FAMILY } from './constants';
 
 let engine: Engine;
-const ready = init().then(() => {
-  engine = new Engine();
-  engine.setFamily(FONT_FAMILY);
-});
+/** The engine once it is loaded; why not, when it could not be (told to every call instead of leaving it waiting). */
+const ready: Promise<string | null> = init().then(
+  () => {
+    engine = new Engine();
+    engine.setFamily(FONT_FAMILY);
+    return null;
+  },
+  (err) => `Движок почерка не загрузился: ${String(err)}`,
+);
+
+/**
+ * A crash inside the engine (a Rust panic, memory run out): it stays locked
+ * after one, every later call failing too — the page starts a new worker.
+ */
+const crashed = (err: unknown) =>
+  err instanceof WebAssembly.RuntimeError || /recursive use of an object|unreachable|null pointer passed to rust/i.test(String(err));
 
 export type EngineOp =
   | { op: 'setStyle'; style: unknown }
@@ -28,8 +40,12 @@ export type EngineOp =
     };
 
 self.onmessage = async (e: MessageEvent<{ id: number; req: EngineOp }>) => {
-  await ready;
+  const failed = await ready;
   const { id, req } = e.data;
+  if (failed) {
+    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: failed });
+    return;
+  }
   try {
     let result: unknown;
     const transfer: Transferable[] = [];
@@ -70,6 +86,6 @@ self.onmessage = async (e: MessageEvent<{ id: number; req: EngineOp }>) => {
     }
     (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: true, result }, transfer);
   } catch (err) {
-    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: String(err) });
+    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: String(err), crashed: crashed(err) });
   }
 };

@@ -3,6 +3,8 @@ import { along, type HandMargins, type MarginLine, type ObjectMask, type Ruling 
 import { apply, homography, invert, type Pt } from './homography';
 import type { Photo } from './photo';
 import { warpMap, type Warp } from './warp';
+import { ZoomPill } from './DeskParts';
+import { clampView, FIT, MAX_PIXELS, usePan, useViewInput, type View } from './view';
 
 const PAD = 12;
 /** How near (screen px) a margin line can be taken. */
@@ -35,6 +37,9 @@ interface Props {
   radius: number;
   onChange: (mask: ObjectMask) => void;
   onMargins: (margins: HandMargins) => void;
+  /** How the photo is looked at (zoomed, moved). */
+  view?: View;
+  onView?: (view: View) => void;
 }
 
 /**
@@ -45,11 +50,11 @@ interface Props {
  * stick to the printed lines (not with Alt); a double click sets a line
  * along the printed lines again.
  */
-export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, brush, radius, onChange, onMargins }: Props) {
+export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, brush, radius, onChange, onMargins, view: zoom = FIT, onView = () => {} }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
-  const [view, setView] = useState<ImageBitmap | null>(null);
+  const [small, setSmall] = useState<ImageBitmap | null>(null);
   const [cursor, setCursor] = useState<Pt | null>(null);
   /** The mask being painted (a copy) and its red overlay. */
   const work = useRef<{ data: Uint8Array; overlay: OffscreenCanvas; image: ImageData } | null>(null);
@@ -60,9 +65,14 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
   const dpr = window.devicePixelRatio || 1;
 
   const map = warpMap(warp);
-  const s = box.w > 0 ? Math.min((box.w - 2 * PAD) / photo.width, (box.h - 2 * PAD) / photo.height) : 0;
-  const ox = (box.w - photo.width * s) / 2;
-  const oy = (box.h - photo.height * s) / 2;
+  const fit = box.w > 0 ? Math.min((box.w - 2 * PAD) / photo.width, (box.h - 2 * PAD) / photo.height) : 0;
+  const maxZ = fit > 0 ? MAX_PIXELS / (dpr * fit) : 1;
+  const v = clampView(zoom, box.w, box.h, maxZ);
+  const s = fit * v.z;
+  const ox = ((box.w - photo.width * fit) / 2) * v.z + v.x;
+  const oy = ((box.h - photo.height * fit) / 2) * v.z + v.y;
+  const space = useViewInput(wrapRef, box.w, box.h, v, onView, maxZ);
+  const pan = usePan(v, onView, box.w, box.h, maxZ);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -73,18 +83,18 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
   }, []);
 
   useEffect(() => {
-    if (s <= 0) return;
+    if (fit <= 0) return;
     let alive = true;
     void createImageBitmap(photo.bitmap, {
-      resizeWidth: Math.max(1, Math.round(photo.width * s * dpr)),
-      resizeHeight: Math.max(1, Math.round(photo.height * s * dpr)),
+      resizeWidth: Math.max(1, Math.round(photo.width * fit * dpr)),
+      resizeHeight: Math.max(1, Math.round(photo.height * fit * dpr)),
       resizeQuality: 'high',
-    }).then((b) => (alive ? setView(b) : b.close()));
+    }).then((b) => (alive ? setSmall(b) : b.close()));
     return () => {
       alive = false;
     };
-  }, [photo, s, dpr]);
-  useEffect(() => () => view?.close(), [view]);
+  }, [photo, fit, dpr]);
+  useEffect(() => () => small?.close(), [small]);
 
   // A fresh mask from outside: copy it and paint its overlay.
   useEffect(() => {
@@ -116,7 +126,9 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, box.w, box.h);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(view ?? photo.bitmap, ox, oy, photo.width * s, photo.height * s);
+    ctx.imageSmoothingEnabled = s * dpr < 2.5;
+    ctx.drawImage(v.z > 1.05 || !small ? photo.bitmap : small, ox, oy, photo.width * s, photo.height * s);
+    ctx.imageSmoothingEnabled = true;
     if (work.current) ctx.drawImage(work.current.overlay, ox, oy, photo.width * s, photo.height * s);
 
     // The printed lines found, mapped from the sheet (mm) onto the photo — along the sheet's curve.
@@ -282,8 +294,15 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
       <canvas
         ref={canvasRef}
         aria-label={brushing ? 'Предметы на листе: кисть отмечает, где писать нельзя' : 'Поля: линии можно перетащить'}
-        style={{ width: box.w, height: box.h, cursor: brushing ? (mask ? 'none' : 'default') : resize }}
+        style={{ width: box.w, height: box.h, cursor: pan.active ? 'grabbing' : space.current ? 'grab' : brushing ? (mask ? 'none' : 'default') : resize }}
         onPointerDown={(e) => {
+          // The middle button or Space: the picture moves (the brush and the lines keep the left one).
+          if (e.button === 1 || space.current) {
+            e.preventDefault();
+            pan.start(e);
+            return;
+          }
+          if (e.button !== 0) return;
           const p = pointer(e);
           if (!brushing) {
             const near = nearest(p);
@@ -300,6 +319,7 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
           setCursor(p);
         }}
         onPointerMove={(e) => {
+          if (pan.move(e)) return;
           const p = pointer(e);
           if (!brushing) {
             if (grab?.dragging) setGrab({ ...grab, line: moveTo(grab.side, grab.part, margins[grab.side] ?? grab.line, p, e.altKey) });
@@ -312,18 +332,24 @@ export function MaskEditor({ photo, warp, paperMm, ruling, margins, mask, tool, 
           if (painting.current) paint(p);
           setCursor(p);
         }}
-        onPointerUp={finish}
+        onPointerUp={() => {
+          if (!pan.end()) finish();
+        }}
         onDoubleClick={(e) => {
           const near = brushing ? null : nearest(pointer(e));
           const l = near && margins[near.side];
           if (near && l) onMargins({ ...margins, [near.side]: straighten(near.side, l) });
         }}
-        onPointerCancel={finish}
+        onPointerCancel={() => {
+          pan.end();
+          finish();
+        }}
         onPointerLeave={() => {
           setCursor(null);
           if (!grab?.dragging) setGrab(null);
         }}
       />
+      {v.z > 1 && <ZoomPill percent={s * dpr * 100} onReset={() => onView(FIT)} />}
     </div>
   );
 }

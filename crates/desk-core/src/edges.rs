@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 
+use crate::bow::{fit_bow, Bow, Spline};
 use crate::img::{Gray, Photo};
 use crate::quad::{convex_clockwise, dist, Line, Pt};
 use crate::rng::Rng;
@@ -58,7 +59,7 @@ fn edge_points(img: &Gray, line: &Line, len: f64, (t0, t1): (f64, f64), radius: 
                 return None;
             }
             let mut part = v[a..=b].to_vec();
-            part.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            part.sort_by(|x, y| x.total_cmp(y));
             Some(part[part.len() / 2])
         };
         let held = |jm: usize| -> Option<f64> {
@@ -68,7 +69,7 @@ fn edge_points(img: &Gray, line: &Line, len: f64, (t0, t1): (f64, f64), radius: 
             Some(way(jm) * (before - after))
         };
         let mut cand: Vec<usize> = (1..d.len() - 1).filter(|&j| d[j] < 0.0 && d[j] <= d[j - 1] && d[j] <= d[j + 1]).collect();
-        cand.sort_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap());
+        cand.sort_by(|&a, &b| d[a].total_cmp(&d[b]));
         let found = cand.into_iter().take(6).find(|&jm| jm >= 2 && jm + 3 <= d.len() && d[jm] <= -need / radius && held(jm).is_some_and(|h| h >= need));
         let Some(jm) = found else { continue };
         let (a, b, c) = (d[jm - 1], d[jm], d[jm + 1]);
@@ -115,7 +116,7 @@ pub fn fit_line(points: &[Pt], seed: u64) -> Option<(Line, usize, f64)> {
     for _ in 0..10 {
         let r: Vec<f64> = points.iter().map(|&p| line.offset(p)).collect();
         let mut abs: Vec<f64> = r.iter().map(|x| x.abs()).collect();
-        abs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        abs.sort_by(|a, b| a.total_cmp(b));
         // At most 6 px: a gently bowed edge is taken whole, but two edges side
         // by side (the ends of a spiral's rings) must not pull the line between them.
         c = (4.685 * 1.4826 * abs[abs.len() / 2]).clamp(0.35, 6.0);
@@ -174,7 +175,7 @@ fn fit_edge(pts: &[(f64, f64)], len: f64, seed: u64) -> Option<[f64; 4]> {
         for _ in 0..8 {
             let res: Vec<f64> = pts.iter().map(|&(t, u)| u - crate::warp::poly(&c, t)).collect();
             let mut abs: Vec<f64> = res.iter().map(|r| r.abs()).collect();
-            abs.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            abs.sort_by(|x, y| x.total_cmp(y));
             let k = (4.685 * 1.4826 * abs[abs.len() / 2]).clamp(0.35, 6.0);
             let w: Vec<f64> = res.iter().map(|r| if r.abs() < k { (1.0 - (r / k).powi(2)).powi(2) } else { 0.0 }).collect();
             c = weighted_poly(pts, &w, deg)?;
@@ -264,15 +265,15 @@ fn lines_along(photo: &Photo, a: Pt, b: Pt, band: f64) -> Option<Pt> {
         hp.iter().map(|x| x * x).sum::<f64>() / hp.len().max(1) as f64
     };
     let coarse: Vec<(f64, f64)> = (-24..=24).map(|i| (f64::from(i) * 0.25f64.to_radians(), 0.0)).map(|(phi, _)| (phi, sharp(phi))).collect();
-    let &(best, top) = coarse.iter().max_by(|x, y| x.1.partial_cmp(&y.1).unwrap())?;
+    let &(best, top) = coarse.iter().max_by(|x, y| x.1.total_cmp(&y.1))?;
     let mut all: Vec<f64> = coarse.iter().map(|c| c.1).collect();
-    all.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    all.sort_by(|x, y| x.total_cmp(y));
     // Lines along one direction, not texture alike in all.
     if top < 2.0 * all[all.len() / 2] {
         return None;
     }
     let fine = (-10..=10).map(|i| best + f64::from(i) * 0.025f64.to_radians()).map(|phi| (phi, sharp(phi)));
-    let (phi, _) = fine.max_by(|x, y| x.1.partial_cmp(&y.1).unwrap())?;
+    let (phi, _) = fine.max_by(|x, y| x.1.total_cmp(&y.1))?;
     Some(turn(phi))
 }
 
@@ -289,7 +290,7 @@ fn by_lines(photo: &Photo, a: Pt, b: Pt, look: f64, outward: f64) -> Option<Line
     let pts = edge_points(photo.smooth(), &Line::through(out(a), out(b)), len, (0.1, 0.9), look, 0.5, 96, 0.0);
     let along = Line { p: [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], d };
     let mut off: Vec<(f64, Pt)> = pts.iter().map(|(p, _)| (along.offset(*p), *p)).collect();
-    off.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    off.sort_by(|x, y| x.0.total_cmp(&y.0));
     // The most steps within 10 px of one line that way (the lines in from
     // the edge and the edge itself may differ by a fraction of a degree); of equals, the outer.
     let mut best = (0, 0);
@@ -539,7 +540,7 @@ fn weighted_poly(pts: &[(f64, f64)], w: &[f64], deg: usize) -> Option<[f64; 4]> 
         }
     }
     for col in 0..n {
-        let piv = (col..n).max_by(|&i, &j| a[i][col].abs().partial_cmp(&a[j][col].abs()).unwrap())?;
+        let piv = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
         if a[piv][col].abs() < 1e-12 {
             return None;
         }
@@ -560,53 +561,40 @@ fn weighted_poly(pts: &[(f64, f64)], w: &[f64], deg: usize) -> Option<[f64; 4]> 
     Some(c)
 }
 
-/// Weighted least squares for a cubic through (t, value) points, Tukey-reweighted
-/// against outliers: the cubic, the share of points that fit it, their RMS.
-fn fit_cubic(pts: &[(f64, f64)]) -> Option<([f64; 4], f64, f64)> {
-    let mut w = vec![1.0; pts.len()];
-    let mut c = [0.0; 4];
-    for _ in 0..8 {
-        c = weighted_poly(pts, &w, 3)?;
-        let res: Vec<f64> = pts.iter().map(|&(t, y)| y - crate::warp::poly(&c, t)).collect();
-        let mut abs: Vec<f64> = res.iter().map(|r| r.abs()).collect();
-        abs.sort_by(|x, y| x.partial_cmp(y).unwrap());
-        let k = (4.685 * 1.4826 * abs[abs.len() / 2]).max(0.3);
-        w = res.iter().map(|r| if r.abs() < k { (1.0 - (r / k).powi(2)).powi(2) } else { 0.0 }).collect();
-    }
-    let inl: Vec<f64> = pts.iter().zip(&w).filter(|(_, &w)| w > 0.0).map(|(&(t, y), _)| y - crate::warp::poly(&c, t)).collect();
-    let rms = (inl.iter().map(|r| r * r).sum::<f64>() / inl.len().max(1) as f64).sqrt();
-    Some((c, inl.len() as f64 / pts.len().max(1) as f64, rms))
-}
-
 #[derive(Serialize, Debug)]
 pub struct Curved {
     /// Where the curved sides meet.
     pub corners: [Pt; 4],
-    /// Each side's bow from the straight line between those corners: a cubic in
-    /// the fraction along the side, photo px along the outward normal (zero at the ends).
-    pub bulge: [[f64; 4]; 4],
+    /// Each side's bow from the straight line between those corners: a spline
+    /// in the fraction along the side, photo px along the outward normal
+    /// (zero at the ends), with as many knots as the edge needs.
+    pub bows: [Bow; 4],
     /// The largest bow, px.
     pub max: f64,
     /// Sides whose edge was found.
     pub fitted: [bool; 4],
 }
 
-/// The sheet's real edges as curves: points along every side to a fraction of
-/// a pixel, a cubic through them (outliers dropped), corners where the curves
-/// meet. A side counts as curved only when the curve is believable: most
-/// points on it, tightly, bowing no more than a paper does (`MAX_BOW` of the side)
-/// and ending near the corners — printed lines or a spiral next to the edge
+/// The sheet's real edges as curves: points along every side every few px,
+/// to a fraction of a pixel, a spline through them (outliers dropped) with
+/// as many knots as the edge's waves need, corners where the curves meet. A
+/// side counts as curved only when the curve is believable: most points on
+/// it, tightly, bowing no more than a paper does (`MAX_BOW` of the side) and
+/// ending near the corners — printed lines or a spiral next to the edge
 /// must not bend the sheet.
 pub fn curved_sides(photo: &Photo, corners: [Pt; 4]) -> Curved {
     let reach = reach(photo);
-    let mut cubic = [[0.0; 4]; 4];
+    let mut fits: Vec<Option<Spline>> = vec![None, None, None, None];
+    let mut knots: Vec<Vec<f64>> = vec![vec![]; 4];
     let mut fitted = [false; 4];
     let lines: Vec<Line> = (0..4).map(|k| Line::through(corners[k], corners[(k + 1) % 4])).collect();
     for k in 0..4 {
         let (a, b) = (corners[k], corners[(k + 1) % 4]);
         let (line, len) = (lines[k], dist(a, b));
+        // A point every 6 px or so.
+        let count = ((len / 6.0) as usize).clamp(64, 400);
         let mut pts = Vec::new();
-        for (p, s) in edge_points(photo.smooth(), &line, len, (0.02, 0.98), reach, 0.5, 64, 0.0) {
+        for (p, s) in edge_points(photo.smooth(), &line, len, (0.02, 0.98), reach, 0.5, count, 0.0) {
             // Close up on the photo itself.
             if let Some((q, _)) = edge_points(&photo.luma, &Line { p, d: line.d }, 1.0, (0.0, 0.0), 3.0, 0.25, 1, s).first() {
                 let t = ((q[0] - a[0]) * line.d[0] + (q[1] - a[1]) * line.d[1]) / len;
@@ -614,23 +602,25 @@ pub fn curved_sides(photo: &Photo, corners: [Pt; 4]) -> Curved {
             }
         }
         if pts.len() >= 24 {
-            if let Some((c, share, rms)) = fit_cubic(&pts) {
-                let ends = crate::warp::poly(&c, 0.0).abs().max(crate::warp::poly(&c, 1.0).abs());
-                let end = crate::warp::poly(&c, 1.0);
-                let bow = (0..=20).map(|i| {
-                    let t = i as f64 / 20.0;
-                    (crate::warp::poly(&c, t) - (1.0 - t) * c[0] - t * end).abs()
+            if let Some((bow, share, rms)) = fit_bow(&pts) {
+                let c = bow.curve();
+                let (start, end) = (c.at(0.0), c.at(1.0));
+                let ends = start.abs().max(end.abs());
+                let bend = (0..=40).map(|i| {
+                    let t = i as f64 / 40.0;
+                    (c.at(t) - (1.0 - t) * start - t * end).abs()
                 });
-                let bow = bow.fold(0.0, f64::max);
-                if share >= 0.6 && rms <= 1.0 && bow <= MAX_BOW * len && ends <= (0.005 * len).max(4.0) {
-                    cubic[k] = c;
+                let bend = bend.fold(0.0, f64::max);
+                if share >= 0.6 && rms <= 1.0 && bend <= MAX_BOW * len && ends <= (0.005 * len).max(4.0) {
+                    fits[k] = Some(c);
+                    knots[k] = bow.t;
                     fitted[k] = true;
                 }
             }
         }
     }
     // The ends of neighbouring curves move the corner (the sides are nearly at right angles).
-    let at = |k: usize, t: f64| crate::warp::poly(&cubic[k], t);
+    let at = |k: usize, t: f64| fits[k].as_ref().map_or(0.0, |c| c.at(t));
     let mut moved = corners;
     for k in 0..4 {
         let prev = (k + 3) % 4;
@@ -638,20 +628,47 @@ pub fn curved_sides(photo: &Photo, corners: [Pt; 4]) -> Curved {
         let (dp, dk) = (at(prev, 1.0), at(k, 0.0));
         moved[k] = [corners[k][0] + dp * np[0] + dk * nk[0], corners[k][1] + dp * np[1] + dk * nk[1]];
     }
+    let straight = || std::array::from_fn(|_| Bow::straight());
     if !convex_clockwise(&moved) || (0..4).any(|k| dist(moved[k], corners[k]) > reach * 2.0) {
-        return Curved { corners, bulge: [[0.0; 4]; 4], max: 0.0, fitted: [false; 4] };
+        return Curved { corners, bows: straight(), max: 0.0, fitted: [false; 4] };
     }
     // The bow left over once the straight part goes from corner to corner.
-    let bulge: [[f64; 4]; 4] = std::array::from_fn(|k| {
-        let c = cubic[k];
-        let end = crate::warp::poly(&c, 1.0);
-        [0.0, c[1] + c[0] - end, c[2], c[3]]
+    let bows: [Bow; 4] = std::array::from_fn(|k| match &fits[k] {
+        Some(c) => {
+            let (start, end) = (c.at(0.0), c.at(1.0));
+            Bow { t: knots[k].clone(), d: knots[k].iter().map(|&t| c.at(t) - (1.0 - t) * start - t * end).collect() }
+        }
+        None => Bow::straight(),
     });
     let max = (0..4)
         .filter(|&k| fitted[k])
-        .flat_map(|k| (0..=20).map(move |i| crate::warp::poly(&bulge[k], i as f64 / 20.0).abs()))
+        .flat_map(|k| {
+            let c = bows[k].curve();
+            (0..=40).map(move |i| c.at(i as f64 / 40.0).abs())
+        })
         .fold(0.0, f64::max);
-    Curved { corners: moved, bulge, max, fitted }
+    Curved { corners: moved, bows, max, fitted }
+}
+
+/// Where the sheet's edge is near the fraction `t` of the side `a → b`: px
+/// from the side along its outward normal (the median of a few points
+/// around `t`, each to a fraction of a pixel), or None when no edge is
+/// there.
+pub fn edge_offset(photo: &Photo, a: Pt, b: Pt, t: f64) -> Option<f64> {
+    let (line, len) = (Line::through(a, b), dist(a, b));
+    if len < 1.0 {
+        return None;
+    }
+    let half = (8.0 / len).min(0.02);
+    let mut off: Vec<f64> = edge_points(photo.smooth(), &line, len, (t - half, t + half), reach(photo), 0.5, 5, 0.0)
+        .into_iter()
+        .filter_map(|(p, s)| edge_points(&photo.luma, &Line { p, d: line.d }, 1.0, (0.0, 0.0), 3.0, 0.25, 1, s).first().map(|q| line.offset(q.0)))
+        .collect();
+    if off.len() < 3 {
+        return None;
+    }
+    off.sort_by(|x, y| x.total_cmp(y));
+    Some(off[off.len() / 2])
 }
 
 /// Whether the side `a → b` (clockwise, outward to its left) is a line
@@ -694,7 +711,7 @@ pub fn paper_both_sides(photo: &Photo, a: Pt, b: Pt) -> bool {
             return None;
         }
         let mut l: Vec<f64> = v.iter().map(|p| p.0).collect();
-        l.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        l.sort_by(|x, y| x.total_cmp(y));
         let level = l[l.len() / 2].max(1e-6);
         let ruled = (v.iter().map(|p| p.1 * p.1).sum::<f64>() / v.len() as f64).sqrt() / level;
         let rgb: [f64; 3] = std::array::from_fn(|c| v.iter().map(|p| p.2[c]).sum::<f64>());

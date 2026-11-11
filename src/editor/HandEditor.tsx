@@ -1,5 +1,4 @@
 import Document from '@tiptap/extension-document';
-import Paragraph from '@tiptap/extension-paragraph';
 import Text from '@tiptap/extension-text';
 import { Dropcursor, Gapcursor, Placeholder, UndoRedo } from '@tiptap/extensions';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
@@ -12,6 +11,8 @@ import type { NodeLayout } from './docLayout';
 import { HandLayout } from './handLayout';
 import { InkColor, Script, TextSize } from './marks';
 import { MathText } from './mathText';
+import { HandParagraph } from './pageBreak';
+import { PasteText } from './pasteText';
 import { SketchFences } from './sketchFences';
 import type { Geometry } from './page';
 import { SelectionBar } from './SelectionBar';
@@ -19,6 +20,20 @@ import { Pagination, remeasure } from './pagination';
 import { docSeed } from './layout';
 import { MissingGlyphPopover } from './MissingGlyphPopover';
 import { MissingGlyphs, missingGlyphsKey } from './missingGlyphs';
+
+/**
+ * The document as JSON, made once per state of the text: saving, the layout's
+ * key and the rendered view all ask for it after every key.
+ */
+const jsons = new WeakMap<object, DocContent>();
+function jsonOf(doc: { toJSON(): unknown }): DocContent {
+  let json = jsons.get(doc);
+  if (!json) {
+    json = doc.toJSON() as DocContent;
+    jsons.set(doc, json);
+  }
+  return json;
+}
 
 interface Props {
   doc: HandDocument;
@@ -58,7 +73,7 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages, on
     {
       extensions: [
         Document,
-        Paragraph,
+        HandParagraph,
         Text,
         UndoRedo,
         Dropcursor.configure({ color: '#e0523f', width: 2 }),
@@ -74,6 +89,7 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages, on
         Script,
         MathText,
         SketchFences,
+        PasteText,
         BlankAnswers.configure({
           hooks: {
             context: () => answersRef.current?.context() ?? null,
@@ -84,7 +100,7 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages, on
         Pagination.configure({
           onPages: (n) => onPagesRef.current(n),
           getGeometry: () => geoRef.current,
-          onLayout: (layout, d) => onLayoutRef.current(layout, d.toJSON() as DocContent),
+          onLayout: (layout, d) => onLayoutRef.current(layout, jsonOf(d)),
         }),
         HandLayout.configure({
           getParams: () => {
@@ -94,8 +110,10 @@ export function HandEditor({ doc, fontSize, geo, onChange, onEditor, onPages, on
         }),
       ],
       content: doc.content,
+      // Copied as plain text, a line of the document is a line (not a paragraph and an empty line).
+      coreExtensionOptions: { clipboardTextSerializer: { blockSeparator: '\n' } },
       editorProps: { attributes: { class: 'hand-text', spellcheck: 'false', 'aria-label': 'Текст документа' } },
-      onUpdate: ({ editor }) => onChange(editor.getJSON() as DocContent),
+      onUpdate: ({ editor }) => onChange(jsonOf(editor.state.doc)),
     },
     [doc.id],
   );

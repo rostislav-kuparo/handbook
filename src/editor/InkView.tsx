@@ -258,12 +258,13 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
       return;
     }
     let alive = true;
+    const stop = new AbortController();
     const settings = wear.settings;
     const timer = setTimeout(() => {
       const source = wearSource.current?.();
       if (!source) return;
       const work: WorkMap[] = [];
-      void documentPages({ ...source, wear: null }, { inkOnly: true, work })
+      void documentPages({ ...source, wear: null }, { inkOnly: true, work, signal: stop.signal })
         .then(() => {
           if (!alive) return;
           setTraces(
@@ -277,10 +278,11 @@ export function InkView({ docId, title, firstNumber, drawPen, content, fontSize,
             }),
           );
         })
-        .catch((err) => console.error(err));
+        .catch((err) => alive && console.error(err));
     }, 300);
     return () => {
       alive = false;
+      stop.abort();
       clearTimeout(timer);
     };
   }, [wearKey, busy]);

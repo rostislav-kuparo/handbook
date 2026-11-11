@@ -16,14 +16,26 @@ export type AnalysisOp =
   | { op: 'curvedSides'; corners: Pt[] }
   | { op: 'bend'; warp: unknown; wMm: number; hMm: number; step: number; offset: number; slope: number; nx: number; ny: number }
   | { op: 'mask'; corners: Pt[]; wMm: number; hMm: number; scale: number }
-  | { op: 'perspective'; focal: number };
+  | { op: 'perspective'; focal: number }
+  | { op: 'edgeOffset'; a: Pt; b: Pt; t: number };
 
-const ready = init();
+/** Why the analysis could not be loaded, if so: told to every call instead of leaving it waiting. */
+const ready: Promise<string | null> = init().then(
+  () => null,
+  (err) => `Разбор фото не загрузился: ${String(err)}`,
+);
 let desk: Desk | null = null;
 
+/** A crash inside the analysis (a Rust panic, memory run out): it stays locked after one — the page starts a new worker. */
+const crashed = (err: unknown) => err instanceof WebAssembly.RuntimeError || /recursive use of an object|unreachable|null pointer passed to rust/i.test(String(err));
+
 self.onmessage = async (e: MessageEvent<{ id: number; req: AnalysisOp }>) => {
-  await ready;
+  const failed = await ready;
   const { id, req } = e.data;
+  if (failed) {
+    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: failed });
+    return;
+  }
   try {
     let result: unknown = null;
     const transfer: Transferable[] = [];
@@ -61,6 +73,9 @@ self.onmessage = async (e: MessageEvent<{ id: number; req: AnalysisOp }>) => {
         case 'perspective':
           result = JSON.parse(desk.perspective(req.focal));
           break;
+        case 'edgeOffset':
+          result = JSON.parse(desk.edgeOffset(JSON.stringify(req.a), JSON.stringify(req.b), req.t));
+          break;
         case 'curvedSides':
           result = JSON.parse(desk.curvedSides(JSON.stringify(req.corners)));
           break;
@@ -79,6 +94,6 @@ self.onmessage = async (e: MessageEvent<{ id: number; req: AnalysisOp }>) => {
     }
     (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: true, result }, transfer);
   } catch (err) {
-    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: String(err) });
+    (self as unknown as DedicatedWorkerGlobalScope).postMessage({ id, ok: false, error: String(err), crashed: crashed(err) });
   }
 };

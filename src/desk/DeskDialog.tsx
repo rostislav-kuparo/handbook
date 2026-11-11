@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { mix32, type PageExport } from '../editor/exporters';
+import { mix32, newMemo, type PageExport } from '../editor/exporters';
 import { docSeed } from '../editor/layout';
 import { printerLook } from '../blank/printer';
 import { reliefOf } from '../wear/relief';
@@ -16,13 +16,17 @@ import { exportFolder, safeFilename, saveFile } from '../util/download';
 import { useLive } from '../util/useLive';
 import { Analyzer, marginLines, NO_MARGINS, type HandMargins, type Margins, type Measure, type ObjectMask, type Ruling, type Specular, type Tilt } from './analysis';
 import { CornerEditor } from './CornerEditor';
-import { Hint, PhotoStrip, Pill, SavedThumb, Section, Shutter, Toasts, Tool, type Message } from './DeskParts';
+import { Hint, LayoutProgress, PhotoStrip, Pill, SavedThumb, Section, Toasts, Tool, type Message } from './DeskParts';
+import { oneToOne, ResultView, type Fit } from './ResultView';
+import { CropBox, fitAspect, within, type Crop } from './CropBox';
+import { FIT, type View } from './view';
 import {
   ActualIcon,
   AgainIcon,
   BrushIcon,
   ClearIcon,
   CloseIcon,
+  CropIcon,
   CurveIcon,
   DotIcon,
   EraseIcon,
@@ -92,11 +96,13 @@ import {
   rasterize,
   rasterizePen,
   rasterScale,
+  freeCanvases,
   type InkLayout,
 } from './inkLayer';
 import { MaskEditor, type Brush, type MaskTool } from './MaskEditor';
 import { loadPhoto, WORK_SIDE, type Photo } from './photo';
-import { GRID_NX, GRID_NY, zeroGrid, type Warp } from './warp';
+import { gridAt, warpMap, zeroGrid, type Warp } from './warp';
+import { bowOfCubic, spline, type Bow } from './bow';
 
 const LOOK_KEY = 'desk.ink';
 const SHEET_KEY = 'desk.sheet';
@@ -104,6 +110,10 @@ const PRINT_KEY = 'desk.print';
 const CAPTURE_KEY = 'desk.capture';
 /** Blur when a photo's edges tell nothing. */
 const FALLBACK_BLUR = 0.7;
+/** How often the layout's progress is shown, ms: every change redraws the whole dialog. */
+const PROGRESS_EVERY = 250;
+/** Scanner looks kept at once: each is a copy of a whole photo. */
+const SCANS_KEPT = 4;
 
 /** Version of the remembered choice: before 2 «подогнать под лист» was the default and is not kept. */
 const SHEET_VERSION = 2;
@@ -166,7 +176,12 @@ interface Desk {
   handTilt: Angles | null;
   /** The lines it was set by (two across the sheet, two down it), when it was: [ax, ay, bx, by]. */
   handLines: number[][] | null;
+  /** What of the photo is saved, px; null: all of it. */
+  crop: Crop | null;
 }
+
+/** The proportions a crop keeps: none, the photo's, the sheet's, or width / height. */
+type CropShape = 'free' | 'photo' | 'sheet' | number;
 
 /** A sheet-shaped frame in the middle of the photo, to be dragged onto the real corners. */
 function startCorners(photo: Photo, [w, h]: [number, number]): Pt[] {
@@ -198,8 +213,26 @@ function topLooksSideways(c: Pt[], [w, h]: [number, number]): boolean {
 const num = (v: number, digits = 1) => v.toLocaleString('ru-RU', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 const keyOf = (d: Desk) => JSON.stringify(d.corners);
 /** The sheet's shape: corners and, when curved, its bow and grid. */
-const shapeOf = (corners: Pt[], bend: DeskBend | null) => JSON.stringify([corners, bend?.bulge ?? null, bend?.grid ?? null]);
-const warpOf = (d: Pick<Desk, 'corners' | 'bend'>): Warp => ({ corners: d.corners, bulge: d.bend?.bulge ?? null, grid: d.bend?.grid ?? null });
+const shapeOf = (corners: Pt[], bend: DeskBend | null) => JSON.stringify([corners, bend?.bows ?? bend?.bulge ?? null, bend?.grid ?? null]);
+const warpOf = (d: Pick<Desk, 'corners' | 'bend'>): Warp => ({ corners: d.corners, bows: bowsOf(d.bend), grid: d.bend?.grid ?? null });
+/** How a bent sheet's sides bow, as splines (an old cubic turned into one); null: flat. */
+const bowsOf = (b: DeskBend | null): Bow[] | null => b?.bows ?? b?.bulge?.map(bowOfCubic) ?? null;
+/** The largest bow of the sides, px. */
+const bowMax = (bows: Bow[]) =>
+  Math.max(
+    0,
+    ...bows.flatMap((b) => {
+      const f = spline(b);
+      return Array.from({ length: 41 }, (_, i) => Math.abs(f(i / 40)));
+    }),
+  );
+/** The bows as one smooth arc each: through five knots, where the sides run now. */
+const simpleBows = (bows: Bow[]): Bow[] =>
+  bows.map((b) => {
+    const f = spline(b);
+    const t = [0, 0.25, 0.5, 0.75, 1];
+    return { t, d: t.map(f) };
+  });
 /** The whole photo: a scan, the sheet filling the frame. */
 const frameOf = (p: Photo): Pt[] => [
   [0, 0],
@@ -319,6 +352,9 @@ export function DeskDialog(props: Props) {
   const [pageDesk, setPageDesk] = useState<Record<number, string>>({});
   const [page, setPage] = useState(0);
   const [layout, setLayout] = useState<InkLayout | null>(null);
+  /** How far the layout under way got (0..1), and about how many seconds it has left, once that can be told. */
+  const [laying, setLaying] = useState<{ part: number; left: number | null }>({ part: 0, left: null });
+  const paragraphs = useRef(newMemo());
   const [busy, setBusy] = useState<string | null>(null);
   const [preparing, setPreparing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -329,7 +365,13 @@ export function DeskDialog(props: Props) {
   const [showLines, setShowLines] = useState(false);
   /** Lines being put along a photo's sheet by hand, to read the perspective off. */
   const [guides, setGuides] = useState<{ id: string; lines: number[][] } | null>(null);
-  const [actual, setActual] = useState(false);
+  /** How the photo is looked at (zoomed, moved): anew for each photo and step. */
+  const [view, setView] = useState<View>(FIT);
+  const resultFit = useRef<Fit | null>(null);
+  /** The crop frame is being set; which proportions it keeps; how much of the desk «По листу» leaves round the sheet, mm. */
+  const [cropping, setCropping] = useState(false);
+  const [cropShape, setCropShape] = useState<CropShape>('free');
+  const [cropRoom, setCropRoom] = useState(8);
   const [drop, setDrop] = useState(false);
   const [picking, setPicking] = useState(false);
   const [brush, setBrush] = useState<Brush>('erase');
@@ -397,7 +439,13 @@ export function DeskDialog(props: Props) {
       analyzer.current = null;
     };
   }, []);
-  useEffect(() => () => desksRef.current.forEach((d) => d.photo.bitmap.close()), []);
+  useEffect(
+    () => () => {
+      desksRef.current.forEach((d) => d.photo.bitmap.close());
+      scans.current.forEach((job) => void job.then((s) => s.bitmap.close()));
+    },
+    [],
+  );
 
   const changeLook = (patch: Partial<SavedLook>) => {
     const next = { ...look, ...patch };
@@ -453,6 +501,7 @@ export function DeskDialog(props: Props) {
       focal35: d.focal35,
       handTilt: d.handTilt,
       handLines: d.handLines,
+      crop: d.crop,
       found: {
         ruling: d.ruling,
         rulingKey: d.rulingKey,
@@ -543,7 +592,7 @@ export function DeskDialog(props: Props) {
   const curve = async (d: Desk, corners: Pt[], force: boolean): Promise<{ corners: Pt[]; bend: DeskBend | null; snapped: boolean[] } | null> => {
     const c = await (await analysisOf(d)).curvedSides(corners);
     if (!force && c.max < CURVED) return null;
-    return { corners: c.corners, snapped: c.fitted, bend: { bulge: c.bulge, grid: zeroGrid(), fixed: false, max: c.max } };
+    return { corners: c.corners, snapped: c.fitted, bend: { bows: c.bows, grid: zeroGrid(), fixed: false, max: c.max } };
   };
 
   /** The lens's focal length for a desk's photo, px. */
@@ -683,6 +732,7 @@ export function DeskDialog(props: Props) {
     tilt: undefined,
     handTilt: null,
     handLines: null,
+    crop: null,
   });
 
   /** The photo turned a quarter clockwise (a scan or a photo that came on its side): a new photo in its place, its sheet found anew. */
@@ -751,6 +801,7 @@ export function DeskDialog(props: Props) {
     tilt: p.found?.tilt,
     handTilt: p.handTilt ?? null,
     handLines: p.handLines ?? null,
+    crop: p.crop ?? null,
   });
 
   /** Opens a desk from «Мои столы» instead of the photos here: its photos, markup and settings as they were saved. */
@@ -849,6 +900,34 @@ export function DeskDialog(props: Props) {
     if (now) patch(d.id, { corners: res.corners, snapped: now.snapped.map((v, k) => (which[k] ? res.snapped[k] : v)) });
   };
 
+  /** The sides bent by hand (a knot moved, added or taken away); a knot let go sticks to the edge near it. */
+  const editBows = (d: Desk, bows: Bow[], done: { side: number; knot: number; free: boolean } | null) => {
+    edits.current++;
+    const b = d.bend ?? { grid: zeroGrid(), fixed: false, max: 0 };
+    patch(d.id, { touched: true, bend: { ...b, bulge: undefined, bows, fixed: false, lines: undefined, max: bowMax(bows) } });
+    if (done && !done.free) void stickKnot(d, bows, done.side, done.knot);
+  };
+  const stickKnot = async (d: Desk, bows: Bow[], k: number, j: number) => {
+    const seq = edits.current;
+    const t = bows[k].t[j];
+    const off = await analysisOf(d)
+      .then((a) => a.edgeOffset(d.corners[k], d.corners[(k + 1) % 4], t))
+      .catch(() => null);
+    const now = desksRef.current.find((x) => x.id === d.id);
+    if (off === null || edits.current !== seq || !now?.bend) return;
+    // The side runs along its chord, bow and the grid's correction there: the bow takes what is left to the edge.
+    const [a, b] = [d.corners[k], d.corners[(k + 1) % 4]];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const n: Pt = [(b[1] - a[1]) / len, -(b[0] - a[0]) / len];
+    const uv: Pt = k === 0 ? [t, 0] : k === 1 ? [1, t] : k === 2 ? [1 - t, 1] : [0, 1 - t];
+    const g = gridAt(now.bend.grid, ...uv);
+    const want = off - (g[0] * n[0] + g[1] * n[1]);
+    // Not the edge it was put by: far from it, it is something else.
+    if (Math.abs(want - bows[k].d[j]) > 12) return;
+    const next = bows.map((w, m) => (m === k ? { t: w.t, d: w.d.map((v, i) => (i === j ? want : v)) } : w));
+    patch(d.id, { bend: { ...now.bend, bows: next, max: bowMax(next) } });
+  };
+
   /** Makes sure the desk has what is asked for, for its present corners and paper; returns it up to date. */
   const prepare = async (id: string, need: { ruling?: boolean; mask?: boolean; measure?: boolean }): Promise<Desk | null> => {
     const d = desksRef.current.find((x) => x.id === id);
@@ -870,7 +949,8 @@ export function DeskDialog(props: Props) {
       let bend = d.bend;
       if (r && bend && !bend.fixed) {
         // Straighten the curved sheet by its own printed lines, then read them again.
-        const fit = await a.bend(warpOf(d), wMm, hMm, r, GRID_NX, GRID_NY);
+        // As fine a grid as the sheet needs (0 × 0: the analysis decides).
+        const fit = await a.bend(warpOf(d), wMm, hMm, r, 0, 0);
         const better = fit.before > 0.12 && fit.after < 0.8 * fit.before;
         bend = { ...bend, fixed: true, ...(better ? { grid: fit.grid, lines: { before: fit.before, after: fit.after } } : {}) };
         if (better) r = (await a.ruling(warpOf({ corners: d.corners, bend }), wMm, hMm)) ?? r;
@@ -910,7 +990,7 @@ export function DeskDialog(props: Props) {
     };
   }, [step, cur?.id, curKey, sizeKey(formatMm(sheet)), sheet.byGrid]);
 
-  const pageCount = layout?.pages.length ?? 1;
+  const pageCount = layout?.layers.length ?? 1;
   const deskFor = (p: number): Desk | null => {
     if (assign === 'one' || desks.length < 2) return cur;
     return desks.find((d) => d.id === pageDesk[p]) ?? desks[p % desks.length] ?? null;
@@ -950,19 +1030,32 @@ export function DeskDialog(props: Props) {
   const effectivePrint: PrintChoice = print.turnAuto && cur ? { ...print, turn: uprightTurn(cur.corners as [number, number][]) } : print;
   useEffect(() => {
     let alive = true;
+    const stop = new AbortController();
+    const started = performance.now();
+    let shown = 0;
+    const onProgress = (part: number) => {
+      const now = performance.now();
+      if (!alive || now - shown < PROGRESS_EVERY) return;
+      shown = now;
+      setLaying({ part, left: part > 0.01 && now - started > 2000 ? ((now - started) * (1 - part)) / part / 1000 : null });
+    };
+    const run = { signal: stop.signal, onProgress, memo: paragraphs.current };
     setLayout(null);
+    setLaying({ part: 0, left: null });
     void (blankId
-      ? blankLayout(base, paperMm, effectivePrint, blankRow ? printShrinkOf(blankRow, paperSize(paperMm)) : 1)
-      : inkLayout(base, setup, paperMm, sheet.mode, refLines, { every: sheet.every, letters: sheet.letters, squares: sheet.squares }, looseMargins)
+      ? blankLayout(base, paperMm, effectivePrint, blankRow ? printShrinkOf(blankRow, paperSize(paperMm)) : 1, run)
+      : inkLayout(base, setup, paperMm, sheet.mode, refLines, { every: sheet.every, letters: sheet.letters, squares: sheet.squares }, looseMargins, run)
     )
       .then((l) => {
         if (!alive) return;
         setLayout(l);
-        setPage((p) => Math.min(p, l.pages.length - 1));
+        setPage((p) => Math.min(p, l.layers.length - 1));
       })
       .catch((err) => alive && setError(String(err)));
     return () => {
       alive = false;
+      // An unwanted layout must not hold up the next one at the engine, nor keep its sheets in memory.
+      stop.abort();
     };
   }, [base, setup, paperKey, sheet.mode, sheet.every, sheet.letters, sheet.squares, refKey, looseKey, effectivePrint.turn, print.skew, print.seed, blankRow?.print]);
 
@@ -1049,7 +1142,7 @@ export function DeskDialog(props: Props) {
     const scale = rasterScale(layout, geo.corners, Math.min(r.maxTexture, 8192), on);
     const parts = layout.layers[p];
     // The text, the drawings and the rubbed graphite apart: each stage can be shown without the next.
-    const raster = await rasterize(parts?.text ?? layout.pages[p] ?? '', layout.size, scale);
+    const raster = await rasterize(parts?.text ?? '', layout.size, scale);
     const drawn = parts ? await rasterize(parts.drawings, layout.size, scale) : null;
     // The light on the creases comes from where the photo's paper is brighter (page px, y down).
     const lit = lightFrom(d.photo, geo.corners);
@@ -1067,14 +1160,21 @@ export function DeskDialog(props: Props) {
     // A scanner app's page: the photo with its light evened out (made once per photo).
     let photo = d.photo;
     if (geo.how === 'scan') {
-      let job = scans.current.get(d.id);
-      if (!job) {
-        job = scannerLook(d.photo);
-        scans.current.set(d.id, job);
+      const job = scans.current.get(d.id) ?? scannerLook(d.photo);
+      // The last used stay: a copy of every photo is a lot of memory.
+      scans.current.delete(d.id);
+      scans.current.set(d.id, job);
+      for (const [id, old] of scans.current) {
+        if (scans.current.size <= SCANS_KEPT) break;
+        scans.current.delete(id);
+        void old.then((s) => s.bitmap.close());
       }
       photo = await job;
     }
-    if (!wanted() || renderer.current !== r) return null;
+    if (!wanted() || renderer.current !== r) {
+      freeCanvases(raster, drawn);
+      return null;
+    }
     const shownKey = `${d.id}|${geo.how}`;
     if (shown.current !== shownKey) {
       r.setPhoto(photo);
@@ -1082,10 +1182,14 @@ export function DeskDialog(props: Props) {
     }
     r.setMask(d.mask);
     r.setToner(toner);
-    r.setLayers(drawn, parts?.wear ?? null);
+    const rubbed = parts?.wear?.() ?? null;
+    r.setLayers(drawn, rubbed);
     r.setRelief(relief);
     r.setPrinter(printerLook(wear.printer, wear.printerSeed));
-    r.setInk(raster, rasterizePen(layout.strokes[p] ?? [], layout.size, scale), placement(layout, geo.warp, on, geo.extras));
+    const pen = rasterizePen(layout.strokes[p] ?? [], layout.size, scale);
+    r.setInk(raster, pen, placement(layout, geo.warp, on, geo.extras));
+    // They are on the GPU now.
+    freeCanvases(raster, drawn, rubbed, pen);
     return r;
   };
 
@@ -1118,18 +1222,13 @@ export function DeskDialog(props: Props) {
   }, [shownDesk?.mask]);
 
   useEffect(() => {
-    if (step === 3 && inkReady && shownDesk) renderer.current?.render(lookFor(shownDesk), photoLookOf(shownDesk, calib?.t ?? null), base.ink, print.toner, stage, leftStage);
+    if (step === 3 && inkReady && layout && shownDesk) renderer.current?.render(lookFor(shownDesk), photoLookOf(shownDesk, calib?.t ?? null), base.ink, print.toner, stage, leftStage);
   });
 
   /** Takes the real pen's colour from words written on the sheet (a click on them). */
-  const pickPen = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const pickPen = async ([x, y]: Pt) => {
     const d = shownDesk;
     if (!picking || !d || !layout) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    // The canvas shows the photo «contained» in its box.
-    const k = Math.min(rect.width / d.photo.width, rect.height / d.photo.height);
-    const x = (e.clientX - rect.left - (rect.width - d.photo.width * k) / 2) / k;
-    const y = (e.clientY - rect.top - (rect.height - d.photo.height * k) / 2) / k;
     const perMm = pixelsPerMm(onDesk(d, layout).paper, d.corners);
     setPicking(false);
     try {
@@ -1166,7 +1265,7 @@ export function DeskDialog(props: Props) {
         if (!r) continue;
         // What is shown is what is saved: «до чертежей» saves the photo with the printing only.
         r.render({ ...lookFor(d), split: 0 }, photoLookOf(d, calib?.t ?? null), base.ink, print.toner, stage);
-        await saveFile(await r.jpeg(0.92), pages.length > 1 ? sheetFile(p) : fileName(p), folder);
+        await saveFile(await r.jpeg(0.92, d.crop), pages.length > 1 ? sheetFile(p) : fileName(p), folder);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1192,7 +1291,7 @@ export function DeskDialog(props: Props) {
     ? null
     : sheet.mode === 'document'
       ? layout.ref
-        ? `Строки и листы — как в документе: ${lineNote}, буквы ×${num(pageScale(layout), 2)} от редактора. Листов: ${layout.pages.length}.${
+        ? `Строки и листы — как в документе: ${lineNote}, буквы ×${num(pageScale(layout), 2)} от редактора. Листов: ${layout.layers.length}.${
             sheet.every !== null && Math.round(layout.ref.pitch / layout.ref.lines.step) < sheet.every ? ' Шире строка не помещается: лист документа длиннее листа тетради.' : ''
           }`
         : looseMargins && Object.values(looseMargins).some((v) => v !== null)
@@ -1200,7 +1299,7 @@ export function DeskDialog(props: Props) {
           : !isA4(paperMm)
             ? 'Лист A4 уменьшен целиком: буквы мельче, чем в документе.'
             : null
-      : `Текст заново разбит на листы ${paperName}${lineNote ? ` по линовке, ${lineNote}` : ''}: ${layout.pages.length}.`;
+      : `Текст заново разбит на листы ${paperName}${lineNote ? ` по линовке, ${lineNote}` : ''}: ${layout.layers.length}.`;
 
   const measured = shownDesk?.measure ?? null;
   const measureNote =
@@ -1225,11 +1324,14 @@ export function DeskDialog(props: Props) {
     patch(d.id, {
       corners: [c[1], c[2], c[3], c[0]],
       snapped: [s[1], s[2], s[3], s[0]],
-      bend: b && { ...b, bulge: [b.bulge[1], b.bulge[2], b.bulge[3], b.bulge[0]], grid: zeroGrid(), fixed: false, lines: undefined },
+      bend: b && (() => {
+        const w = bowsOf(b)!;
+        return { ...b, bulge: undefined, bows: [w[1], w[2], w[3], w[0]], grid: zeroGrid(), fixed: false, lines: undefined };
+      })(),
     });
   };
-  const toggleBend = (d: Desk) => {
-    if (d.bend) {
+  const toggleBend = (d: Desk, again = false) => {
+    if (d.bend && !again) {
       patch(d.id, { bend: null });
       return;
     }
@@ -1251,6 +1353,42 @@ export function DeskDialog(props: Props) {
     document.addEventListener('keydown', keys);
     return () => document.removeEventListener('keydown', keys);
   }, [step]);
+
+  // Another photo or another step: the whole photo again (or the whole crop, or all of it to crop by).
+  useEffect(() => setView(FIT), [step, cur?.id, shownDesk?.id, cropping]);
+  useEffect(() => {
+    if (step !== 3) setCropping(false);
+  }, [step]);
+  /** The proportions (width / height) of a crop shape on this photo; null: free. */
+  const aspectOf = (d: Desk, shape: CropShape): number | null => {
+    if (shape === 'free') return null;
+    if (shape === 'photo') return d.photo.width / d.photo.height;
+    if (shape !== 'sheet') return shape;
+    // As the sheet lies in the photo.
+    const [pw, ph] = paperFor(d);
+    const across = dist(d.corners[0], d.corners[1]) > dist(d.corners[0], d.corners[3]) === pw > ph;
+    return across ? pw / ph : ph / pw;
+  };
+  /** The frame round the sheet with some of the desk: what is seen of it, in the proportions chosen. */
+  const cropBySheet = (d: Desk, room: number, shape: CropShape): Crop => {
+    const { width: w, height: h } = d.photo;
+    const map = warpMap(warpOf(d));
+    const pts = Array.from({ length: 33 }, (_, i) => i / 32).flatMap((t) => [map(t, 0), map(1, t), map(t, 1), map(0, t)]);
+    const m = room * pixelsPerMm(paperSize(paperFor(d)), d.corners);
+    const [x0, x1] = [Math.max(0, Math.min(...pts.map((p) => p[0])) - m), Math.min(w, Math.max(...pts.map((p) => p[0])) + m)];
+    const [y0, y1] = [Math.max(0, Math.min(...pts.map((p) => p[1])) - m), Math.min(h, Math.max(...pts.map((p) => p[1])) + m)];
+    const a = aspectOf(d, shape);
+    if (!a) return [x0, y0, x1, y1];
+    // Grown to the proportions (the sheet stays inside), as far as the photo allows.
+    const [cx, cy] = [(x0 + x1) / 2, (y0 + y1) / 2];
+    let [cw, ch] = [x1 - x0, y1 - y0];
+    if (cw / ch > a) ch = cw / a;
+    else cw = ch * a;
+    if (cw > w || ch > h) return fitAspect([0, 0, w, h], a, w, h);
+    return within([cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2], w, h);
+  };
+  /** The result shown pixel for pixel. */
+  const actual = !!resultFit.current && Math.abs(resultFit.current.fit * view.z * (window.devicePixelRatio || 1) - 1) < 0.02;
 
   // What the program has to say, over the photo.
   const messages: Message[] = [];
@@ -1383,6 +1521,7 @@ export function DeskDialog(props: Props) {
                 <Hint side="right">
                   Перетащите уголки на уголки листа: отпущенный уголок прилипает к краям (сплошная линия — край найден, пунктир — нет). С Alt — без
                   прилипания, с Shift — точнее, стрелками — на ¼ пикселя, Tab — следующий уголок.
+                  {' '}Ромбики на краях гнут край: отпущенный прилипает к краю на снимке (с Alt — нет), двойной щелчок по краю добавляет ромбик, Alt + щелчок убирает.
                   {cur.bend && ' Квадратные точки сетки изогнутого листа можно тянуть там, где текст должен лечь иначе.'}
                 </Hint>
               </>
@@ -1437,7 +1576,17 @@ export function DeskDialog(props: Props) {
                     onClick={() => setPicking(!picking)}
                   />
                 )}
-                <Tool icon={<ActualIcon />} label="Масштаб 1:1" on={actual} onClick={() => setActual(!actual)} />
+                <Tool
+                  icon={<CropIcon />}
+                  label="Обрезка: что из снимка сохранять"
+                  on={cropping}
+                  disabled={!shownDesk}
+                  onClick={() => {
+                    setPicking(false);
+                    setCropping(!cropping);
+                  }}
+                />
+                <Tool icon={<ActualIcon />} label="Масштаб 1:1 (колесо мыши — ближе или дальше)" on={actual} onClick={() => setView(actual || !resultFit.current ? FIT : oneToOne(resultFit.current))} />
               </>
             )}
           </div>
@@ -1532,6 +1681,9 @@ export function DeskDialog(props: Props) {
                 setGuides({ id: cur.id, lines });
                 if (done) applyLines(cur, lines);
               }}
+              onBows={(bows, done) => editBows(cur, bows, done)}
+              view={view}
+              onView={setView}
             />
           )}
           {step === 2 && cur && (
@@ -1548,19 +1700,37 @@ export function DeskDialog(props: Props) {
               radius={brushRadius}
               onChange={(m) => patch(cur.id, { mask: m })}
               onMargins={(m) => patch(cur.id, { margins: m })}
+              view={view}
+              onView={setView}
             />
           )}
-          <div className={`desk-result ${actual ? 'actual' : ''} ${picking ? 'picking' : ''}`} hidden={step !== 3}>
-            <canvas
-              ref={canvasRef}
-              onClick={(e) => void pickPen(e)}
-              style={
-                actual && shownDesk
-                  ? { width: shownDesk.photo.width / (window.devicePixelRatio || 1), height: shownDesk.photo.height / (window.devicePixelRatio || 1) }
-                  : undefined
-              }
-            />
-            {step === 3 && !actual && inkReady > 0 && shownDesk && <Shutter value={split} onChange={setSplit} aspect={shownDesk.photo.width / shownDesk.photo.height} />}
+          <ResultView
+            canvasRef={canvasRef}
+            width={shownDesk?.photo.width ?? 0}
+            height={shownDesk?.photo.height ?? 0}
+            hidden={step !== 3}
+            view={view}
+            onView={setView}
+            onFit={(f) => (resultFit.current = f)}
+            picking={picking}
+            onPick={(p) => void pickPen(p)}
+            shutter={step === 3 && inkReady > 0 && shownDesk && !cropping ? { value: split, onChange: setSplit } : null}
+            region={cropping ? null : (shownDesk?.crop ?? null)}
+            over={
+              cropping && shownDesk
+                ? (place) => (
+                    <CropBox
+                      crop={shownDesk.crop ?? [0, 0, shownDesk.photo.width, shownDesk.photo.height]}
+                      width={shownDesk.photo.width}
+                      height={shownDesk.photo.height}
+                      place={place}
+                      aspect={aspectOf(shownDesk, cropShape)}
+                      onChange={(crop) => patch(shownDesk.id, { crop })}
+                    />
+                  )
+                : undefined
+            }
+          >
             {step === 3 && inkReady > 0 && (
               <div className="desk-stages" role="group" aria-label="Показать до этапа">
                 <span className="small muted">Показать до:</span>
@@ -1579,8 +1749,11 @@ export function DeskDialog(props: Props) {
                 )}
               </div>
             )}
+          </ResultView>
+          <div className="desk-busy-stack">
+            {step === 3 && !layout && <LayoutProgress {...laying} />}
+            {(busy || preparing) && <div className="desk-busy">{busy ?? preparing}</div>}
           </div>
-          {(busy || preparing || (step === 3 && !layout)) && <div className="desk-busy">{busy ?? preparing ?? 'Раскладываю текст по листу…'}</div>}
           <Toasts messages={shownMessages} onClose={dismiss} />
         </main>
 
@@ -1734,9 +1907,30 @@ export function DeskDialog(props: Props) {
                   {cur.bend && (
                     <Section
                       title="Изогнутый лист"
-                      hint={`Края выгнуты дугой — это учтено.${paperKind !== 'plain' ? ' На линованном листе сетка сама подстроится под линии на шаге «Помехи».' : ''}`}
+                      hint={`Края повторяют снимок: на каждом столько точек, сколько нужно, чтобы пройти по всем изгибам. Ромбики на краях можно тянуть, двойной щелчок по краю добавляет точку.${paperKind !== 'plain' ? ' На линованном листе сетка сама подстроится под линии на шаге «Помехи» — так густо, как нужно.' : ''}`}
+                      aside={
+                        <button className="link-btn" disabled={!!busy} onClick={() => toggleBend(cur, true)} title="Найти изогнутые края заново по снимку">
+                          ↺ как найдено
+                        </button>
+                      }
                     >
-                      <p className="small">Края выгнуты до {num(cur.bend.max)} px.</p>
+                      {(() => {
+                        const bows = bowsOf(cur.bend)!;
+                        const g = cur.bend.grid;
+                        return (
+                          <>
+                            <p className="small">
+                              Края выгнуты до {num(cur.bend.max)} px; точек на краях: {bows.map((b) => b.t.length - 2).join(', ')}
+                              {g.nx > 5 ? `; сетка ${g.nx}×${g.ny}` : ''}.
+                            </p>
+                            {bows.some((b) => b.t.length > 5) && (
+                              <button className="link-btn" onClick={() => editBows(cur, simpleBows(bows), null)} title="Каждый край — одной плавной дугой (если точки легли на что-то лишнее)">
+                                Упростить
+                              </button>
+                            )}
+                          </>
+                        );
+                      })()}
                     </Section>
                   )}
                 </>
@@ -1819,6 +2013,63 @@ export function DeskDialog(props: Props) {
 
               {step === 3 && (
                 <>
+                  {shownDesk && (cropping || shownDesk.crop) && (
+                    <Section
+                      title="Обрезка"
+                      hint="Что из снимка сохранять. Тяните стороны и углы рамки, внутри неё — двигать; Shift держит пропорции. Снимок режется пиксель в пиксель, без пересжатия. У каждого фото своя обрезка."
+                      aside={
+                        shownDesk.crop && (
+                          <button className="link-btn" onClick={() => patch(shownDesk.id, { crop: null })} title="Сохранять весь снимок">
+                            ↺ весь снимок
+                          </button>
+                        )
+                      }
+                    >
+                      {cropping ? (
+                        <>
+                          <Pill
+                            wrap
+                            value={cropShape}
+                            onChange={(shape) => {
+                              setCropShape(shape);
+                              const a = aspectOf(shownDesk, shape);
+                              const { width: w, height: h } = shownDesk.photo;
+                              if (a) patch(shownDesk.id, { crop: fitAspect(shownDesk.crop ?? [0, 0, w, h], a, w, h) });
+                            }}
+                            options={[
+                              ['free', 'свободно'],
+                              ['photo', 'как снимок'],
+                              [3 / 4, '3:4'],
+                              [4 / 3, '4:3'],
+                              [1, '1:1'],
+                              ['sheet', 'как лист'],
+                            ]}
+                          />
+                          <label className="slider" title="Сколько стола оставить вокруг листа">
+                            <span>
+                              Отступ от листа <output>{cropRoom} мм</output>
+                            </span>
+                            <input type="range" min={0} max={20} step={1} value={cropRoom} onChange={(e) => setCropRoom(Number(e.target.value))} />
+                          </label>
+                          <div className="desk-field">
+                            <button className="btn" onClick={() => patch(shownDesk.id, { crop: cropBySheet(shownDesk, cropRoom, cropShape) })} title="Рамка вокруг листа с отступом; где лист выходит за кадр — по краю кадра">
+                              По листу
+                            </button>
+                            <button className="btn primary" onClick={() => setCropping(false)}>
+                              Готово
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="small">
+                          Сохранится {Math.round(shownDesk.crop![2] - shownDesk.crop![0])} × {Math.round(shownDesk.crop![3] - shownDesk.crop![1])} px.{' '}
+                          <button className="link-btn" onClick={() => setCropping(true)}>
+                            Изменить
+                          </button>
+                        </p>
+                      )}
+                    </Section>
+                  )}
                   {(pageCount > 1 || desks.length > 1) && (
                     <Section title="Лист документа" hint="Какой лист документа сейчас на фото. Если фото несколько, каждому листу можно дать своё: выберите лист и щёлкните по фото внизу.">
                       {pageCount > 1 && (

@@ -271,7 +271,7 @@ pub fn join_lines(samples: &[&Prepared]) -> Joins {
         if v.is_empty() {
             return None;
         }
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         Some((v[v.len() / 2] / 5.0).round() * 5.0)
     };
     let low = median(low);
@@ -858,7 +858,7 @@ mod tests {
     }
 
     fn wave(h: f64) -> Vec<(f64, f64)> {
-        (0..=40).map(|i| (i as f64 * 10.0, h * (i as f64 / 40.0 * 3.14).sin() + 30.0)).collect()
+        (0..=40).map(|i| (i as f64 * 10.0, h * (i as f64 / 40.0 * std::f64::consts::PI).sin() + 30.0)).collect()
     }
 
     #[test]

@@ -5,6 +5,27 @@ import { createPortal } from 'react-dom';
 import { CloseIcon } from '../ui/icons';
 import type { Photo } from './photo';
 
+/** About how long is left, in words. */
+const timeLeft = (sec: number) => (sec < 50 ? `ещё около ${Math.max(5, Math.ceil(sec / 5) * 5)} с` : `ещё около ${Math.max(1, Math.round(sec / 60))} мин`);
+
+/** How far the text's layout got: `part` 0..1, and the seconds left once they can be told. */
+export function LayoutProgress({ part, left }: { part: number; left: number | null }) {
+  const percent = Math.floor(part * 100);
+  return (
+    <div className="desk-busy desk-progress" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+      <div className="desk-progress-text">
+        <span>Раскладываю текст по листу…</span>
+        <span className="desk-progress-num">
+          {percent} %{left !== null && ` · ${timeLeft(left)}`}
+        </span>
+      </div>
+      <div className="desk-progress-track">
+        <div className="desk-progress-bar" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 /**
  * A «?» that shows its text on hover or focus; `side`: where the text opens.
  * The text floats over everything (a scrolling card must not cut it off).
@@ -193,32 +214,15 @@ export function PhotoStrip({
  * «До / после» as a curtain over the result: left of it the photo as it
  * was. `box`: the photo's place in the canvas (it is shown «contained»).
  */
-export function Shutter({ value, onChange, aspect }: { value: number; onChange: (v: number) => void; aspect: number }) {
+export function Shutter({ value, onChange, box }: { value: number; onChange: (v: number) => void; box: { left: number; top: number; width: number; height: number } }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
-  useEffect(() => {
-    const el = ref.current?.parentElement;
-    if (!el) return;
-    const fit = () => {
-      const r = el.getBoundingClientRect();
-      const s = getComputedStyle(el);
-      const [pl, pt] = [parseFloat(s.paddingLeft), parseFloat(s.paddingTop)];
-      const [w, h] = [r.width - pl - parseFloat(s.paddingRight), r.height - pt - parseFloat(s.paddingBottom)];
-      const [bw, bh] = w / h > aspect ? [h * aspect, h] : [w, w / aspect];
-      setBox({ left: pl + (w - bw) / 2, top: pt + (h - bh) / 2, width: bw, height: bh });
-    };
-    fit();
-    const ro = new ResizeObserver(fit);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [aspect]);
   const drag = (e: React.PointerEvent) => {
-    if (!box || !(e.buttons & 1)) return;
+    if (!(e.buttons & 1)) return;
     const r = ref.current!.getBoundingClientRect();
     onChange(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
   };
   return (
-    <div className="desk-shutter" ref={ref} style={box ?? { display: 'none' }}>
+    <div className="desk-shutter" ref={ref} style={box.height > 0 ? box : { display: 'none' }}>
       <div
         className="desk-shutter-handle"
         style={{ left: `${value * 100}%` }}
@@ -233,5 +237,14 @@ export function Shutter({ value, onChange, aspect }: { value: number; onChange: 
         <span className="desk-shutter-grip">до · после</span>
       </div>
     </div>
+  );
+}
+
+/** How close the photo is looked at, while it is zoomed: a click fits it again. */
+export function ZoomPill({ percent, onReset }: { percent: number; onReset: () => void }) {
+  return (
+    <button className="zoom-pill desk-zoom-pill float" onClick={onReset} title="Масштаб снимка: колесо мыши, Ctrl + «+» / «−»; двигать — средней кнопкой или с пробелом; щелчок — весь снимок (Ctrl + 0)">
+      {Math.round(percent)} % · ⟲
+    </button>
   );
 }

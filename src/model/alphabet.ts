@@ -1,8 +1,11 @@
+import { POINT_SIGNS } from './points';
+
 /**
  * A shelf of the handwriting studio's alphabet: one script in one case, or
- * all the symbols (they have no case). The pills under the alphabet pick it.
+ * all the symbols, or the points of drawings (these have no case). The pills
+ * under the alphabet pick it.
  */
-export type Shelf = 'cyr-lower' | 'cyr-upper' | 'lat-lower' | 'lat-upper' | 'sym';
+export type Shelf = 'cyr-lower' | 'cyr-upper' | 'lat-lower' | 'lat-upper' | 'sym' | 'points';
 
 export interface CharGroup {
   id: string;
@@ -39,6 +42,8 @@ export const CHAR_GROUPS: CharGroup[] = [
   // Roman numerals as written by hand (sticks with serifs): used for I, II, IV чверті… instead of drawn sticks.
   { id: 'roman', title: 'Римские цифры', chars: ['Ⅰ', 'Ⅴ', 'Ⅹ', 'Ⅼ', 'Ⅽ', 'Ⅾ', 'Ⅿ'], shelf: 'sym' },
   { id: 'math', title: 'Формулы', chars: [...'αβγδεθλμπρσφωΔΣΩ×·−±≠≈≤≥<>°′⊥∥∠△√∞∈→'], shelf: 'sym' },
+  // Drawn, not written: a drawing's points take these variants (the open circle comes first, it is the usual one on an epure).
+  { id: 'points', title: 'Точки чертежа', chars: [POINT_SIGNS[2], POINT_SIGNS[0], POINT_SIGNS[1], POINT_SIGNS[3]], shelf: 'points' },
 ];
 
 const isLatin = (key: string) => /\p{Script=Latin}/u.test(key);

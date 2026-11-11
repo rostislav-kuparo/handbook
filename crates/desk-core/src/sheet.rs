@@ -182,7 +182,7 @@ pub(crate) fn components(m: &[bool], w: usize, h: usize) -> (Vec<u32>, Vec<usize
 
 /// Andrew's monotone chain; clockwise on screen (y down).
 fn convex_hull(mut p: Vec<Pt>) -> Vec<Pt> {
-    p.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
     p.dedup();
     if p.len() < 3 {
         return p;
@@ -332,7 +332,7 @@ fn lined_blocks(photo: &Photo) -> Option<(usize, usize, usize, Vec<bool>)> {
     let mut votes = [0usize; 15];
     for b in &blocks {
         for (ac, swing) in b {
-            let best = (3..15).max_by(|&i, &j| ac[i].partial_cmp(&ac[j]).unwrap()).unwrap();
+            let best = (3..15).max_by(|&i, &j| ac[i].total_cmp(&ac[j])).unwrap();
             if *swing >= SWING && ac[best] >= 0.5 {
                 votes[best] += 1;
             }
@@ -493,7 +493,7 @@ fn sides_of(hull: &[Pt]) -> Option<[Pt; 4]> {
     for (g, list) in edges.iter().enumerate() {
         let total: f64 = list.iter().map(|e| e.2).sum();
         let mut by: Vec<&(Pt, Pt, f64, f64)> = list.iter().collect();
-        by.sort_by(|x, y| x.3.partial_cmp(&y.3).unwrap());
+        by.sort_by(|x, y| x.3.total_cmp(&y.3));
         let (mut acc, mut main) = (0.0, 0.0);
         for e in &by {
             acc += e.2;

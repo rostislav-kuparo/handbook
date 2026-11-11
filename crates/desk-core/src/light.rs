@@ -26,7 +26,7 @@ fn fit(points: &[(f64, f64, f64, f64)]) -> Option<[f64; 6]> {
         }
     }
     for col in 0..6 {
-        let piv = (col..6).max_by(|&i, &j| a[i][col].abs().partial_cmp(&a[j][col].abs()).unwrap())?;
+        let piv = (col..6).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
         if a[piv][col].abs() < 1e-12 {
             return None;
         }
@@ -88,7 +88,7 @@ pub fn paper_surface(photo: &Photo, corners: &[Pt; 4]) -> (Option<[[f64; 6]; 3]>
             let (u, v) = (0.03 + 0.94 * (cx as f64 + 0.5) / n as f64, 0.03 + 0.94 * (cy as f64 + 0.5) / n as f64);
             cells.push(std::array::from_fn(|c| {
                 let mut l = vals[c].clone();
-                l.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                l.sort_by(|a, b| a.total_cmp(b));
                 (u, v, l[l.len() * 3 / 4], 1.0)
             }));
         }
@@ -104,7 +104,7 @@ pub fn paper_surface(photo: &Photo, corners: &[Pt; 4]) -> (Option<[[f64; 6]; 3]>
         for _ in 0..3 {
             let mut res: Vec<f64> = pts.iter().map(|&(u, v, y, _)| (y - eval(&coef, u, v)).abs()).collect();
             let mut sorted = res.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let k = (4.685 * 1.4826 * sorted[sorted.len() / 2]).max(1e-4);
             for (p, r) in pts.iter_mut().zip(res.iter_mut()) {
                 p.3 = if *r < k { (1.0 - (*r / k).powi(2)).powi(2) } else { 0.0 };

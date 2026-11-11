@@ -111,7 +111,7 @@ pub fn order_corners(mut q: [Pt; 4]) -> [Pt; 4] {
     q.sort_by(|a, b| {
         let ta = (a[1] - c[1]).atan2(a[0] - c[0]);
         let tb = (b[1] - c[1]).atan2(b[0] - c[0]);
-        ta.partial_cmp(&tb).unwrap()
+        ta.total_cmp(&tb)
     });
     // atan2 with y down grows clockwise on screen.
     let side = |q: &[Pt; 4], k: usize| dist(q[k], q[(k + 1) % 4]);

@@ -35,6 +35,16 @@ export function AskDialog({ blank, onClose }: { blank: Blank; onClose: () => voi
     return () => window.removeEventListener('keydown', esc);
   }, [blank.id]);
 
+  // The picture's memory is given back when the dialog closes.
+  const pictureUrl = useRef<string | null>(null);
+  pictureUrl.current = picture?.url ?? null;
+  useEffect(
+    () => () => {
+      if (pictureUrl.current) URL.revokeObjectURL(pictureUrl.current);
+    },
+    [],
+  );
+
   // The picture with the marks as they are now.
   useEffect(() => {
     if (!marks) return;

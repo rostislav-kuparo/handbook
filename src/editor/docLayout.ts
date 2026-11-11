@@ -29,9 +29,20 @@ function hash(s: string): string {
 
 /** The text, the letters' size, the page and the title a layout belongs to. */
 export function layoutKey(content: DocContent, fontSize: number, geo: Geometry, showTitle: boolean): string {
-  const json = JSON.stringify(content);
   const m = geo.margin;
-  return [hash(json), json.length, fontSize, geo.contentW, m.top, m.bottom, showTitle ? 1 : 0].join(':');
+  return [textKey(content), fontSize, geo.contentW, m.top, m.bottom, showTitle ? 1 : 0].join(':');
+}
+
+/** The text's part of the key, worked out once per content (the editor hands the same object to all who ask while the text is the same). */
+const textKeys = new WeakMap<object, string>();
+function textKey(content: DocContent): string {
+  let key = textKeys.get(content);
+  if (key === undefined) {
+    const json = JSON.stringify(content);
+    key = `${hash(json)}:${json.length}`;
+    textKeys.set(content, key);
+  }
+  return key;
 }
 
 /** The nodes of a layout, when it fits these nodes (the same count): null otherwise. */

@@ -1,4 +1,5 @@
 import getStroke from 'perfect-freehand';
+import { POINT_CENTER, pointRadiusUnits, POINT_SIGNS } from '../model/points';
 import { CAP_HEIGHT, DESCENDER, InkPoint, X_HEIGHT } from '../model/types';
 
 /** Visible copybook band in font units (y up). */
@@ -54,6 +55,39 @@ export function drawGuides(ctx: CanvasRenderingContext2D, w: number, h: number, 
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
+}
+
+/**
+ * Where a point of a drawing goes on the sheet: a cross hair at the exact
+ * place, and dashed the size the program draws this kind of point itself.
+ */
+export function drawPointGuide(ctx: CanvasRenderingContext2D, toPx: ToPx, scale: number, c: InkColors, sign: string, weight: number) {
+  const [cx, cy] = toPx(POINT_CENTER.x, POINT_CENTER.y);
+  const radius = pointRadiusUnits(weight) * scale;
+  const open = sign === POINT_SIGNS[2];
+  const filled = sign === POINT_SIGNS[0];
+  ctx.strokeStyle = c.guideStrong;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 7, cy);
+  ctx.lineTo(cx + 7, cy);
+  ctx.moveTo(cx, cy - 7);
+  ctx.lineTo(cx, cy + 7);
+  ctx.stroke();
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  if (open || filled) {
+    ctx.arc(cx, cy, radius * (open ? 1.7 : 1), 0, Math.PI * 2);
+  } else {
+    const arm = radius * 1.6;
+    const turn = sign === POINT_SIGNS[1] ? Math.PI / 4 : 0;
+    for (const a of [turn, turn + Math.PI / 2]) {
+      ctx.moveTo(cx - Math.cos(a) * arm, cy - Math.sin(a) * arm);
+      ctx.lineTo(cx + Math.cos(a) * arm, cy + Math.sin(a) * arm);
+    }
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 /** Variable-width live ink (perfect-freehand), already in pixels. */

@@ -117,7 +117,7 @@ fn smallest(mut m: [[f64; 3]; 3]) -> V3 {
             row[q] = s * a + c * b;
         }
     }
-    let i = (0..3).min_by(|&a, &b| m[a][a].partial_cmp(&m[b][b]).unwrap()).unwrap();
+    let i = (0..3).min_by(|&a, &b| m[a][a].total_cmp(&m[b][b])).unwrap();
     [v[0][i], v[1][i], v[2][i]]
 }
 

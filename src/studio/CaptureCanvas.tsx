@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 import { isPair } from '../model/alphabet';
 import { InkPoint, Stroke } from '../model/types';
-import { CELL, drawGuides, drawStroke, prepareCanvas, themeColors } from './inkDraw';
+import { CELL, drawGuides, drawPointGuide, drawStroke, prepareCanvas, themeColors } from './inkDraw';
 
 export interface CaptureHandle {
   save: () => void;
@@ -22,9 +22,11 @@ interface Props {
   handle?: Ref<CaptureHandle>;
   /** More buttons at the end of the row (the studio's previous / next letter). */
   extra?: ReactNode;
+  /** The sign is a point of a drawing: the sheet shows where it goes. */
+  pointSign?: boolean;
 }
 
-export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = true, handle, extra }: Props) {
+export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = true, handle, extra, pointSign }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef<Stroke[]>([]);
@@ -61,12 +63,13 @@ export function CaptureCanvas({ char, penWidth, height = 420, onSave, hotkeys = 
     ctx.fillText(char, 10, height * 0.17);
     ctx.globalAlpha = 1;
     drawGuides(ctx, w, height, toPx, colors);
+    if (pointSign) drawPointGuide(ctx, toPx, scale, colors, char, penWidth);
 
     ctx.fillStyle = colors.ink;
     const all = currentRef.current ? [...strokesRef.current, currentRef.current] : strokesRef.current;
     const simulate = pointerTypeRef.current !== 'pen';
     for (const s of all) drawStroke(ctx, s, toPx, penWidth * scale, simulate, s !== currentRef.current);
-  }, [cellWidthPx, height, char, penWidth, scale, toPx]);
+  }, [cellWidthPx, height, char, penWidth, scale, toPx, pointSign]);
 
   useEffect(draw, [draw]);
 

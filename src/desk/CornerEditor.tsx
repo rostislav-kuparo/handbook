@@ -1,16 +1,29 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Pt } from './homography';
+import { bowOfCubic, spline, straightBow, type Bow } from './bow';
+import { apply, type Pt } from './homography';
 import type { Photo } from './photo';
-import { warpMap, type Grid, type Warp } from './warp';
+import { gridAt, warpMap, type Grid, type Warp } from './warp';
+import { ZoomPill } from './DeskParts';
+import { clampView, FIT, MAX_PIXELS, usePan, useViewInput, type View } from './view';
 
 const HANDLE = 18;
 const LOUPE_R = 80;
 const PAD = 28;
 /** Points per side when a curved side is drawn. */
-const SIDE_STEPS = 32;
+const SIDE_STEPS = 64;
 
-/** A point to drag: a corner, a node of the grid of a curved sheet, or an end of a guide line (line · 2 + end). */
-type Handle = { kind: 'corner'; i: number } | { kind: 'node'; i: number } | { kind: 'guide'; i: number };
+/**
+ * A point to drag: a corner, a node of the grid of a curved sheet, an end of
+ * a guide line (line · 2 + end), or a knot of a side's bow (side · 64 + knot).
+ */
+type Handle = { kind: 'corner'; i: number } | { kind: 'node'; i: number } | { kind: 'guide'; i: number } | { kind: 'knot'; i: number };
+
+/** The knots a side starts with when it is bent by hand. */
+const FIRST_KNOTS = [0, 0.25, 0.5, 0.75, 1];
+/** Two knots no closer than this share of the side. */
+const KNOT_GAP = 0.03;
+/** The grid nodes shown: as many as on a 5×7 grid (a finer one follows them smoothly). */
+const SHOWN = [5, 7];
 
 /** Colours of the two directions of lines: across the sheet, down it. */
 const LINE_COLORS = ['#ff6b9a', '#3fd4ff'];
@@ -34,7 +47,7 @@ interface Props {
   corners: Pt[];
   onChange: (corners: Pt[]) => void;
   /** A curved sheet: its sides' bow and grid (the corners come from `corners`). */
-  bend?: Pick<Warp, 'bulge' | 'grid'> | null;
+  bend?: Pick<Warp, 'bulge' | 'bows' | 'grid'> | null;
   /** A node of the grid was moved. */
   onGrid?: (grid: Grid) => void;
   /** Sides (top, right, bottom, left) that lie on the sheet's real edge: drawn solid, the rest dashed. */
@@ -49,6 +62,14 @@ interface Props {
   guides?: number[][] | null;
   /** The guides moved; `done`: a drag or a key press ended. */
   onGuides?: (guides: number[][], done: boolean) => void;
+  /**
+   * The sides' bows changed (a knot moved, added or taken away); `done`: a
+   * knot was let go there — `free` with Alt (no sticking to the edge).
+   */
+  onBows?: (bows: Bow[], done: { side: number; knot: number; free: boolean } | null) => void;
+  /** How the photo is looked at (zoomed, moved). */
+  view?: View;
+  onView?: (view: View) => void;
 }
 
 /**
@@ -57,16 +78,16 @@ interface Props {
  * pixels of the full-size photo around it; Shift moves it eight times slower,
  * arrow keys by a quarter of a pixel.
  */
-export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, onRelease, onNudge, found, guides, onGuides }: Props) {
+export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, onRelease, onNudge, found, guides, onGuides, onBows, view: zoom = FIT, onView = () => {} }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
-  const [view, setView] = useState<ImageBitmap | null>(null);
+  const [small, setSmall] = useState<ImageBitmap | null>(null);
   const [active, setActive] = useState<Handle>({ kind: 'corner', i: 0 });
   const [loupe, setLoupe] = useState(false);
   const [hover, setHover] = useState(false);
   /** The point being dragged: where it is now, where it and (a node) its offset were at the start. */
-  const drag = useRef<{ h: Handle; last: Pt; at: Pt; start: Pt; offset: Pt; moved: boolean } | null>(null);
+  const drag = useRef<{ h: Handle; last: Pt; at: Pt; start: Pt; grid0: Pt[] | null; moved: boolean } | null>(null);
   const dpr = window.devicePixelRatio || 1;
   // The keys move what can be dragged: the guides' ends while they are shown.
   const guiding = !!guides;
@@ -79,30 +100,119 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
     if (!drag.current) setReach(reachOf(photo, corners));
   }, [photo, corners, settled]);
   const [x0, y0, x1, y1] = reach;
-  // Fit it into the box, with room around it for the handles.
-  const s = box.w > 0 ? Math.min((box.w - 2 * PAD) / (x1 - x0), (box.h - 2 * PAD) / (y1 - y0)) : 0;
-  const ox = (box.w - (x1 - x0) * s) / 2 - x0 * s;
-  const oy = (box.h - (y1 - y0) * s) / 2 - y0 * s;
+  // Fit it into the box, with room around it for the handles; then as zoomed and moved.
+  const fit = box.w > 0 ? Math.min((box.w - 2 * PAD) / (x1 - x0), (box.h - 2 * PAD) / (y1 - y0)) : 0;
+  const maxZ = fit > 0 ? MAX_PIXELS / (dpr * fit) : 1;
+  const v = clampView(zoom, box.w, box.h, maxZ);
+  const s = fit * v.z;
+  const ox = ((box.w - (x1 - x0) * fit) / 2 - x0 * fit) * v.z + v.x;
+  const oy = ((box.h - (y1 - y0) * fit) / 2 - y0 * fit) * v.z + v.y;
+  const space = useViewInput(wrapRef, box.w, box.h, v, onView, maxZ);
+  const pan = usePan(v, onView, box.w, box.h, maxZ);
   const toScreen = ([x, y]: Pt): Pt => [ox + x * s, oy + y * s];
 
-  const map = warpMap({ corners, bulge: bend?.bulge ?? null, grid: bend?.grid ?? null });
+  const map = warpMap({ corners, bulge: bend?.bulge ?? null, bows: bend?.bows ?? null, grid: bend?.grid ?? null });
   const grid = bend?.grid ?? null;
-  /** Grid nodes that can be dragged (the corners are dragged as corners). */
+  /** Grid nodes that can be dragged (the corners are dragged as corners); of a fine grid, those of a 5×7 one. */
   const nodes: { i: number; at: Pt }[] = [];
+  const every = grid ? [Math.max(1, Math.round((grid.nx - 1) / (SHOWN[0] - 1))), Math.max(1, Math.round((grid.ny - 1) / (SHOWN[1] - 1)))] : [1, 1];
   if (grid) {
-    for (let j = 0; j < grid.ny; j++) {
-      for (let i = 0; i < grid.nx; i++) {
+    for (let j = 0; j < grid.ny; j += every[1]) {
+      for (let i = 0; i < grid.nx; i += every[0]) {
         const corner = (i === 0 || i === grid.nx - 1) && (j === 0 || j === grid.ny - 1);
         if (!corner) nodes.push({ i: j * grid.nx + i, at: map(i / (grid.nx - 1), j / (grid.ny - 1)) });
       }
     }
   }
+  /** The grid with node `i` moved by `by` from `from`: on a fine grid its neighbours follow, less the further they are. */
+  const gridMoved = (from: Pt[], i: number, by: Pt): Grid => {
+    const g = grid!;
+    const [ci, cj] = [i % g.nx, Math.floor(i / g.nx)];
+    const fine = every[0] > 1 || every[1] > 1;
+    return {
+      ...g,
+      d: from.map((o, k) => {
+        const [di, dj] = [((k % g.nx) - ci) / every[0], (Math.floor(k / g.nx) - cj) / every[1]];
+        const w = fine ? Math.exp(-1.25 * (di * di + dj * dj)) : k === i ? 1 : 0;
+        return [o[0] + by[0] * w, o[1] + by[1] * w];
+      }),
+    };
+  };
+
+  // The sides' bows: as the sheet bends, or straight with a few knots to bend it by.
+  const bows: Bow[] = (bend?.bows ?? bend?.bulge?.map(bowOfCubic) ?? [0, 1, 2, 3].map(straightBow)).map((b) => (b.t.length > 2 ? b : { t: FIRST_KNOTS, d: FIRST_KNOTS.map(() => 0) }));
+  const chord = (k: number) => {
+    const [a, b] = [corners[k], corners[(k + 1) % 4]];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
+    const d: Pt = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    return { a, b, len, d, n: [d[1], -d[0]] as Pt };
+  };
+  /** Side k at s (0..1 from its corner k) as a point of the sheet. */
+  const uvOf = (k: number, s: number): Pt => (k === 0 ? [s, 0] : k === 1 ? [1, s] : k === 2 ? [1 - s, 1] : [0, 1 - s]);
+  /** How far along side k's chord a photo point lies (0..1). */
+  const tOf = (k: number, p: Pt) => {
+    const c = chord(k);
+    return ((p[0] - c.a[0]) * c.d[0] + (p[1] - c.a[1]) * c.d[1]) / c.len;
+  };
+  /** The point of the sheet on side k level with the fraction t of its chord (as the bow is laid out). */
+  const uvAt = (k: number, t: number): Pt => {
+    let [lo, hi] = [0, 1];
+    for (let n = 0; n < 30; n++) {
+      const mid = (lo + hi) / 2;
+      if (tOf(k, apply(map.h, uvOf(k, mid))) < t) lo = mid;
+      else hi = mid;
+    }
+    return uvOf(k, (lo + hi) / 2);
+  };
+  /** The knots between the corners, where they are on the photo. */
+  const knots: { i: number; at: Pt }[] = bows.flatMap((b, k) => b.t.slice(1, -1).map((t, j) => ({ i: k * 64 + j + 1, at: map(...uvAt(k, t)) })));
+  /** The bows with knot `i` moved to photo point p (across the side only; it keeps its place along it). */
+  const bowsWith = (i: number, p: Pt): Bow[] => {
+    const [k, j] = [i >> 6, i & 63];
+    const c = chord(k);
+    const t = bows[k].t[j];
+    const g = grid ? gridAt(grid, ...uvAt(k, t)) : [0, 0];
+    const off = (p[0] - c.a[0] - c.d[0] * c.len * t - g[0]) * c.n[0] + (p[1] - c.a[1] - c.d[1] * c.len * t - g[1]) * c.n[1];
+    return bows.map((b, m) => (m === k ? { t: b.t, d: b.d.map((v, n) => (n === j ? off : v)) } : b));
+  };
+  /** A knot more on the side nearest screen point p (where the side already runs: its shape stays), or null. */
+  const withKnot = (p: Pt): Bow[] | null => {
+    let best: { k: number; at: Pt; dist: number } | null = null;
+    for (let k = 0; k < 4; k++) {
+      const pts = sidePoints(k);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [a, b] = [toScreen(pts[i]), toScreen(pts[i + 1])];
+        const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+        const f = Math.min(1, Math.max(0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+        const q: Pt = [a[0] + dx * f, a[1] + dy * f];
+        const dist = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (dist < HANDLE && (!best || dist < best.dist)) best = { k, at: [(q[0] - ox) / s, (q[1] - oy) / s], dist };
+      }
+    }
+    if (!best) return null;
+    const { k } = best;
+    const t = tOf(k, best.at);
+    const b = bows[k];
+    if (t <= KNOT_GAP || t >= 1 - KNOT_GAP || b.t.some((x) => Math.abs(x - t) < KNOT_GAP)) return null;
+    const at = b.t.findIndex((x) => x > t);
+    const v = spline(b)(t);
+    return bows.map((w, m) => (m === k ? { t: [...w.t.slice(0, at), t, ...w.t.slice(at)], d: [...w.d.slice(0, at), v, ...w.d.slice(at)] } : w));
+  };
+  /** The bows without knot `i`. */
+  const withoutKnot = (i: number): Bow[] => {
+    const [k, j] = [i >> 6, i & 63];
+    return bows.map((b, m) => (m === k ? { t: b.t.filter((_, n) => n !== j), d: b.d.filter((_, n) => n !== j) } : b));
+  };
   const endOf = (i: number): Pt => {
     const l = guides?.[i >> 1] ?? [0, 0, 0, 0];
     return i & 1 ? [l[2], l[3]] : [l[0], l[1]];
   };
   const pointOf = (h: Handle): Pt =>
-    h.kind === 'corner' ? corners[h.i] : h.kind === 'guide' ? endOf(h.i) : (nodes.find((n) => n.i === h.i)?.at ?? corners[0]);
+    h.kind === 'corner'
+      ? corners[h.i]
+      : h.kind === 'guide'
+        ? endOf(h.i)
+        : ((h.kind === 'knot' ? knots : nodes).find((n) => n.i === h.i)?.at ?? corners[0]);
   /** A side as a polyline in photo px (curved when the sheet is). */
   const sidePoints = (k: number): Pt[] =>
     Array.from({ length: SIDE_STEPS + 1 }, (_, i) => {
@@ -118,23 +228,23 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
     return () => ro.disconnect();
   }, []);
 
-  // A copy of the photo at screen size, so redrawing while dragging stays smooth.
+  // A copy of the photo at the fitted size, so redrawing while dragging stays smooth (zoomed in, the photo itself).
   useEffect(() => {
-    if (s <= 0) return;
+    if (fit <= 0) return;
     let alive = true;
     void createImageBitmap(photo.bitmap, {
-      resizeWidth: Math.max(1, Math.round(photo.width * s * dpr)),
-      resizeHeight: Math.max(1, Math.round(photo.height * s * dpr)),
+      resizeWidth: Math.max(1, Math.round(photo.width * fit * dpr)),
+      resizeHeight: Math.max(1, Math.round(photo.height * fit * dpr)),
       resizeQuality: 'high',
     }).then((b) => {
-      if (alive) setView(b);
+      if (alive) setSmall(b);
       else b.close();
     });
     return () => {
       alive = false;
     };
-  }, [photo, s, dpr]);
-  useEffect(() => () => view?.close(), [view]);
+  }, [photo, fit, dpr]);
+  useEffect(() => () => small?.close(), [small]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -145,7 +255,10 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, box.w, box.h);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(view ?? photo.bitmap, ox, oy, photo.width * s, photo.height * s);
+    // Close up, the photo's own pixels.
+    ctx.imageSmoothingEnabled = s * dpr < 2.5;
+    ctx.drawImage(v.z > 1.05 || !small ? photo.bitmap : small, ox, oy, photo.width * s, photo.height * s);
+    ctx.imageSmoothingEnabled = true;
 
     const sides = [0, 1, 2, 3].map(sidePoints);
     const outline = sides.flatMap((p) => p.slice(0, -1));
@@ -176,8 +289,8 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
           }
           c.stroke();
         };
-        for (let i = 1; i < grid.nx - 1; i++) line((t) => map(i / (grid.nx - 1), t));
-        for (let j = 1; j < grid.ny - 1; j++) line((t) => map(t, j / (grid.ny - 1)));
+        for (let i = every[0]; i < grid.nx - 1; i += every[0]) line((t) => map(i / (grid.nx - 1), t));
+        for (let j = every[1]; j < grid.ny - 1; j += every[1]) line((t) => map(t, j / (grid.ny - 1)));
       }
       sides.forEach((pts, k) => {
         c.beginPath();
@@ -280,6 +393,25 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       ctx.stroke();
     });
 
+    if (!guides) {
+      for (const n of knots) {
+        const [x, y] = toScreen(n.at);
+        const on = isActive({ kind: 'knot', i: n.i });
+        const r = on ? 6.5 : 5;
+        ctx.beginPath();
+        ctx.moveTo(x, y - r);
+        ctx.lineTo(x + r, y);
+        ctx.lineTo(x, y + r);
+        ctx.lineTo(x - r, y);
+        ctx.closePath();
+        ctx.fillStyle = on ? '#ffb020' : 'rgba(255, 255, 255, 0.9)';
+        ctx.fill();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.stroke();
+      }
+    }
+
     guides?.forEach((_, k) =>
       [0, 1].forEach((e) => {
         const [x, y] = toScreen(endOf(2 * k + e));
@@ -349,6 +481,7 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       return best;
     }
     corners.forEach((c, i) => consider({ kind: 'corner', i }, c));
+    knots.forEach((n) => consider({ kind: 'knot', i: n.i }, n.at));
     nodes.forEach((n) => consider({ kind: 'node', i: n.i }, n.at));
     return best;
   };
@@ -363,10 +496,10 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
     } else if (d.h.kind === 'corner') {
       const i = d.h.i;
       onChange(corners.map((c, k) => (k === i ? d.at : c)));
-    } else if (grid) {
-      const i = d.h.i;
-      const off: Pt = [d.offset[0] + d.at[0] - d.start[0], d.offset[1] + d.at[1] - d.start[1]];
-      onGrid?.({ ...grid, d: grid.d.map((g, k) => (k === i ? off : g)) });
+    } else if (d.h.kind === 'knot') {
+      onBows?.(bowsWith(d.h.i, d.at), null);
+    } else if (grid && d.grid0) {
+      onGrid?.(gridMoved(d.grid0, d.h.i, [d.at[0] - d.start[0], d.at[1] - d.start[1]]));
     }
   };
 
@@ -377,8 +510,11 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
       onGuides?.(guidesWith(h.i, [at[0] + d[0], at[1] + d[1]]), true);
     } else if (h.kind === 'corner') {
       onChange(corners.map((c, k) => (k === h.i ? [c[0] + d[0], c[1] + d[1]] : c)));
+    } else if (h.kind === 'knot') {
+      const at = pointOf(h);
+      onBows?.(bowsWith(h.i, [at[0] + d[0], at[1] + d[1]]), null);
     } else if (grid) {
-      onGrid?.({ ...grid, d: grid.d.map((g, k) => (k === h.i ? [g[0] + d[0], g[1] + d[1]] : g)) });
+      onGrid?.(gridMoved(grid.d, h.i, d));
     }
   };
 
@@ -388,19 +524,25 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
         ref={canvasRef}
         tabIndex={0}
         aria-label="Уголки листа на фото"
-        style={{ width: box.w, height: box.h, cursor: drag.current ? 'grabbing' : hover ? 'grab' : 'default' }}
+        style={{ width: box.w, height: box.h, cursor: drag.current || pan.active ? 'grabbing' : hover ? 'grab' : v.z > 1 ? 'move' : 'default' }}
         onPointerDown={(e) => {
           const p = pointer(e);
-          const h = nearest(p);
-          if (!h) return;
+          const h = e.button === 0 && !space.current ? nearest(p) : null;
+          // The middle button, Space or an empty place: the picture moves.
+          if (!h) {
+            if (e.button === 1 || space.current || v.z > 1) pan.start(e);
+            if (e.button === 1) e.preventDefault();
+            return;
+          }
           e.currentTarget.setPointerCapture(e.pointerId);
           e.currentTarget.focus();
           const at = pointOf(h);
-          drag.current = { h, last: p, at, start: at, offset: h.kind === 'node' && grid ? grid.d[h.i] : [0, 0], moved: false };
+          drag.current = { h, last: p, at, start: at, grid0: grid ? grid.d.map((g) => [...g] as Pt) : null, moved: false };
           setActive(h);
           setLoupe(true);
         }}
         onPointerMove={(e) => {
+          if (pan.move(e)) return;
           const p = pointer(e);
           const d = drag.current;
           if (!d) {
@@ -417,18 +559,26 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
           place(d);
         }}
         onPointerUp={(e) => {
+          if (pan.end()) return;
           const d = drag.current;
           drag.current = null;
           setLoupe(false);
           setSettled((n) => n + 1);
           // The last move may not be drawn yet: hand over where the point really is.
           if (d?.moved && d.h.kind === 'guide') onGuides?.(guidesWith(d.h.i, d.at), true);
+          if (d?.h.kind === 'knot') {
+            const i = d.h.i;
+            // Alt + a click: the knot goes; let go after a move: it may stick to the edge.
+            if (!d.moved && e.altKey) onBows?.(withoutKnot(i), null);
+            else if (d.moved) onBows?.(bowsWith(i, d.at), { side: i >> 6, knot: i & 63, free: e.altKey });
+          }
           if (d?.moved && d.h.kind === 'corner') {
             const i = d.h.i;
             onRelease?.(i, e.altKey, corners.map((c, k) => (k === i ? d.at : c)));
           }
         }}
         onPointerCancel={() => {
+          pan.end();
           drag.current = null;
           setLoupe(false);
           setSettled((n) => n + 1);
@@ -450,7 +600,17 @@ export function CornerEditor({ photo, corners, onChange, bend, onGrid, snapped, 
           setLoupe(true);
         }}
         onBlur={() => setLoupe(false)}
+        onDoubleClick={(e) => {
+          if (guides) return;
+          const r = canvasRef.current!.getBoundingClientRect();
+          const p: Pt = [e.clientX - r.left, e.clientY - r.top];
+          const h = nearest(p);
+          if (h?.kind === 'knot' || h?.kind === 'corner') return;
+          const next = withKnot(p);
+          if (next) onBows?.(next, null);
+        }}
       />
+      {v.z > 1 && <ZoomPill percent={s * dpr * 100} onReset={() => onView(FIT)} />}
     </div>
   );
 }

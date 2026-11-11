@@ -156,7 +156,7 @@ pub fn simplify_closed(poly: &[[f64; 2]], eps: f64) -> Vec<[f64; 2]> {
     }
     // Split the ring at the vertex farthest from vertex 0 and simplify both halves.
     let far = (1..poly.len())
-        .max_by(|&a, &b| d2(poly[0], poly[a]).partial_cmp(&d2(poly[0], poly[b])).unwrap())
+        .max_by(|&a, &b| d2(poly[0], poly[a]).total_cmp(&d2(poly[0], poly[b])))
         .unwrap();
     let mut first: Vec<[f64; 2]> = poly[..=far].to_vec();
     let mut second: Vec<[f64; 2]> = poly[far..].to_vec();

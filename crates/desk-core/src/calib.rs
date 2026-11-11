@@ -17,7 +17,7 @@ pub struct Calib {
 }
 
 fn percentile(v: &mut [f64], p: f64) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     v[((v.len() - 1) as f64 * p).round() as usize]
 }
 
@@ -42,7 +42,7 @@ pub fn calibrate(photo: &Photo, x: f64, y: f64, radius: f64, sigma: f64) -> Opti
     }
     // The darkest quarter of the ink: the cores of the strokes.
     let mut idx: Vec<usize> = (0..w * h).filter(|&i| ink[i]).collect();
-    idx.sort_by(|&a, &b| luma[a].partial_cmp(&luma[b]).unwrap());
+    idx.sort_by(|&a, &b| luma[a].total_cmp(&luma[b]));
     let core = &idx[..(idx.len() / 4).max(3)];
     let mut t: [f64; 3] = std::array::from_fn(|c| {
         let mut v: Vec<f64> = core.iter().map(|&i| photo.lin(x0 + i % w, y0 + i / w, c) as f64 / paper[c].max(1e-4)).collect();

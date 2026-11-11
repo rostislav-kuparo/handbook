@@ -1,10 +1,13 @@
 import { Extension } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
+import type { Node as PMNode } from '@tiptap/pm/model';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { NodeLayout } from './docLayout';
 import { LINE_HEIGHT_EM } from './layout';
 import { lineSegments } from './lines';
+import { measureStamp, sagVersion, voidMeasures } from './measureCache';
 import type { Geometry } from './page';
+import { startsPage } from './pageBreak';
 import { zoomOf } from './zoom';
 
 // Editor plugins are set up once per editor: reload the page instead of hot-swapping.
@@ -30,6 +33,8 @@ interface Spacer {
   height: number;
   /** Between top-level nodes (before a paragraph or block) or inside a paragraph (before a wrapped line). */
   block: boolean;
+  /** Its widget's name on the page, given when it is put there (the place moves with the text afterwards). */
+  key?: string;
 }
 
 interface PageState {
@@ -42,8 +47,58 @@ export const REMEASURE_EVENT = 'hand-remeasure';
 
 /** Ask the layout plugins (pagination, sag) to measure again: font rebuilt, size changed… */
 export function remeasure(view: EditorView) {
+  voidMeasures(view.dom);
   view.dom.dispatchEvent(new Event(REMEASURE_EVENT));
 }
+
+/**
+ * Where a paragraph's wrapped lines start, as measured: the place in the
+ * paragraph (from its start), the line's number and its start in the text by
+ * code points. Kept per paragraph (see measureCache.ts).
+ */
+interface LineStart {
+  rel: number;
+  k: number;
+  cp: number;
+}
+const lineStarts = new WeakMap<PMNode, { stamp: string; sag: number; starts: LineStart[] }>();
+
+/** The lines measured for this paragraph still hold: nothing that moves its words has changed. */
+function measured(node: PMNode, stamp: string) {
+  const known = lineStarts.get(node);
+  return known && known.stamp === stamp && known.sag === sagVersion(node) ? known : null;
+}
+
+const fontPxOf = (view: EditorView) => parseFloat(getComputedStyle(view.dom).fontSize) || 16;
+
+/**
+ * Page breaks inside the paragraphs about to be measured are taken out first.
+ * A break stays where it was in the text: once the words around it have moved
+ * (typing, another font or size), it would cut a line short there — and that
+ * would be measured, and kept, as a line's start. Measured without them, the
+ * lines are the paragraph's own, and the breaks are put back where they belong.
+ */
+function dropStaleBreaks(view: EditorView) {
+  const spacers = paginationKey.getState(view.state)?.spacers ?? [];
+  const inner = spacers.filter((s) => !s.block);
+  if (inner.length === 0) return;
+  const stamp = measureStamp(view, fontPxOf(view));
+  const stale = new Set<Spacer>();
+  view.state.doc.forEach((node, offset) => {
+    if (node.type.name === 'htmlBlock' || measured(node, stamp)) return;
+    const end = offset + node.nodeSize;
+    for (const sp of inner) if (sp.pos > offset && sp.pos < end) stale.add(sp);
+  });
+  if (stale.size === 0) return;
+  view.dispatch(
+    view.state.tr.setMeta(
+      paginationKey,
+      spacers.filter((sp) => !stale.has(sp)),
+    ).setMeta('addToHistory', false),
+  );
+}
+
+const spacerKey = (s: Spacer) => `page-${s.pos}-${s.block ? 'b' : 'i'}-${Math.round(s.height)}`;
 
 function spacerDecorations(doc: Parameters<typeof DecorationSet.create>[0], spacers: Spacer[]): DecorationSet {
   return DecorationSet.create(
@@ -58,7 +113,7 @@ function spacerDecorations(doc: Parameters<typeof DecorationSet.create>[0], spac
           el.contentEditable = 'false';
           return el;
         },
-        { side: -1, key: `page-${s.pos}-${s.block ? 'b' : 'i'}-${Math.round(s.height)}`, ignoreSelection: true },
+        { side: -1, key: s.key ?? spacerKey(s), ignoreSelection: true },
       ),
     ),
   );
@@ -72,6 +127,8 @@ interface Unit {
   /** The top-level node it belongs to, and where its line starts in that paragraph's text (code points). */
   node: number;
   start: number;
+  /** The paragraph starts a sheet of its own («с новой страницы»). */
+  newPage?: boolean;
 }
 
 /**
@@ -85,8 +142,9 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
   // Screen positions are zoomed with the sheets: everything below is in sheet pixels.
   const z = zoomOf(stack);
   const top0 = stack.getBoundingClientRect().top / z;
-  const fontPx = parseFloat(getComputedStyle(view.dom).fontSize) || 16;
+  const fontPx = fontPxOf(view);
   const lh = fontPx * LINE_HEIGHT_EM;
+  const stamp = measureStamp(view, fontPx);
   const current = paginationKey.getState(view.state)?.spacers ?? [];
   // Height of the spacers that currently push a position down.
   const blockBefore = (pos: number) => current.filter((s) => s.pos <= pos && (s.block || s.pos < pos)).reduce((a, s) => a + s.height, 0);
@@ -113,25 +171,32 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
     const rect = dom.getBoundingClientRect();
     const r = { top: rect.top / z };
     const paraTop = r.top - top0 - blockBefore(offset);
-    units.push({ pos: offset, top: paraTop, height: lh, block: true, node: index, start: 0 });
+    units.push({ pos: offset, top: paraTop, height: lh, block: true, node: index, start: 0, newPage: index > 0 && startsPage(node) });
     // Further lines of the paragraph: find where wrapped lines start.
     const start = offset + 1;
-    const text = node.textBetween(0, node.content.size, undefined, '￼');
-    let lastLine = 0;
-    // Every piece of text that starts a visual line — including the middle of a
-    // word too long for one line — is a place where a page may have to break.
-    for (const seg of lineSegments(view, start, text, lh)) {
-      const q = seg.from;
-      const inner = current.filter((s) => !s.block && s.pos > offset && s.pos <= q).reduce((a, s) => a + s.height, 0);
-      // The glyph box sits 0.225em below its line top; small sag offsets are absorbed by rounding.
-      const k = Math.round((seg.top - r.top - inner - 0.225 * fontPx) / lh);
-      if (k > lastLine) {
-        // The line's start in the text as the ink renderer counts it: text only, by code points.
-        const before = node.textBetween(0, q - start, undefined, () => '');
-        units.push({ pos: q, top: paraTop + k * lh, height: lh, block: false, node: index, start: [...before].length });
-        lastLine = k;
+    let known = measured(node, stamp);
+    if (!known) {
+      const starts: LineStart[] = [];
+      const text = node.textBetween(0, node.content.size, undefined, '￼');
+      let lastLine = 0;
+      // Every piece of text that starts a visual line — including the middle of a
+      // word too long for one line — is a place where a page may have to break.
+      for (const seg of lineSegments(view, start, text, lh)) {
+        const q = seg.from;
+        const inner = current.filter((s) => !s.block && s.pos > offset && s.pos <= q).reduce((a, s) => a + s.height, 0);
+        // The glyph box sits 0.225em below its line top; small sag offsets are absorbed by rounding.
+        const k = Math.round((seg.top - r.top - inner - 0.225 * fontPx) / lh);
+        if (k > lastLine) {
+          // The line's start in the text as the ink renderer counts it: text only, by code points.
+          const before = node.textBetween(0, q - start, undefined, () => '');
+          starts.push({ rel: q - start, k, cp: [...before].length });
+          lastLine = k;
+        }
       }
+      known = { stamp, sag: sagVersion(node), starts };
+      lineStarts.set(node, known);
     }
+    for (const l of known.starts) units.push({ pos: start + l.rel, top: paraTop + l.k * lh, height: lh, block: false, node: index, start: l.cp });
   });
 
   const spacers: Spacer[] = [];
@@ -142,7 +207,13 @@ function measure(view: EditorView, geo: Geometry): { spacers: Spacer[]; pages: n
     const p = Math.max(0, Math.floor(y / geo.pitch));
     const cTop = geo.contentTop(p);
     const cBottom = geo.contentBottom(p);
-    if (p > 0 && y < cTop - 0.5) {
+    if (u.newPage && !(p > 0 && Math.abs(y - cTop) < 0.5)) {
+      // «С новой страницы»: to the top of the next sheet (unless it is there already, or in the gap before it).
+      const next = y < cTop - 0.5 ? cTop : geo.contentTop(p + 1);
+      spacers.push({ pos: u.pos, height: next - y, block: true });
+      shift += next - y;
+      y = next;
+    } else if (p > 0 && y < cTop - 0.5) {
       // Landed in the gap or the top margin of a sheet.
       spacers.push({ pos: u.pos, height: cTop - y, block: u.block });
       shift += cTop - y;
@@ -190,11 +261,17 @@ export const Pagination = Extension.create<{
           init: () => ({ spacers: [], decorations: DecorationSet.empty }),
           apply: (tr, old) => {
             const next = tr.getMeta(paginationKey) as Spacer[] | undefined;
-            if (next) return { spacers: next, decorations: spacerDecorations(tr.doc, next) };
+            if (next) {
+              const named = next.map((s) => ({ ...s, key: spacerKey(s) }));
+              return { spacers: named, decorations: spacerDecorations(tr.doc, named) };
+            }
             if (!tr.docChanged) return old;
+            // A break inside text that was deleted is gone from the page: it must not be counted as still pushing the lines down.
+            const decorations = old.decorations.map(tr.mapping, tr.doc);
+            const left = new Set(decorations.find().map((d) => (d.spec as { key?: string }).key));
             return {
-              spacers: old.spacers.map((s) => ({ ...s, pos: tr.mapping.map(s.pos, -1) })),
-              decorations: old.decorations.map(tr.mapping, tr.doc),
+              spacers: old.spacers.filter((s) => left.has(s.key)).map((s) => ({ ...s, pos: tr.mapping.map(s.pos, -1) })),
+              decorations,
             };
           },
         },
@@ -208,7 +285,9 @@ export const Pagination = Extension.create<{
             frame = requestAnimationFrame(() => {
               if (view.isDestroyed) return;
               const geo = getGeometry();
-              const result = geo && measure(view, geo);
+              if (!geo) return;
+              dropStaleBreaks(view);
+              const result = measure(view, geo);
               if (!result) return;
               if (result.pages !== pages) {
                 pages = result.pages;
@@ -227,7 +306,10 @@ export const Pagination = Extension.create<{
             });
           };
           schedule();
-          void document.fonts.ready.then(schedule);
+          void document.fonts.ready.then(() => {
+            voidMeasures(view.dom);
+            schedule();
+          });
           const ro = new ResizeObserver(schedule);
           ro.observe(view.dom);
           view.dom.addEventListener(REMEASURE_EVENT, schedule);

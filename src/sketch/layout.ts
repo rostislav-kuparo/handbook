@@ -7,6 +7,7 @@ import * as g from './geometry';
 import type { LabelInk } from './labels';
 import { formatNumber } from './lang';
 import { dashes, dot, hatch, outline, rng, wobble, type Pen } from './pen';
+import { dealPointMarks, evenly } from './pointInk';
 import type { Hatching, Item, Scene, Shape, Vec } from './types';
 
 export interface InkPath {
@@ -457,10 +458,14 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
   const pointRadius = (it: Item) => Math.max(1.8, pen.width * 1.1 + fs * 0.05) * Math.sqrt(it.thickness / 5);
   const unevenPoints = pen.points ?? 1;
   const unevenJoins = pen.joins ?? 1;
+  /** The variants the user drew of the points, one for each point that has any. */
+  const pointMarks = dealPointMarks(items, !unevenPoints);
   /**
    * How the hand put a point down (the same every time: its seed): a little
    * bigger or smaller, an open ring a little oval and off the exact spot.
    * `ring`: radius of an open point's ring; `r` goes on for the rest of its look.
+   * `drawn`: a variant the user drew, at the size it has beside the letters,
+   * a little turned and bigger or smaller, so that it never repeats exactly.
    */
   const handPoint = (it: Item) => {
     const r = rng(mix(it.seed, 0x9017));
@@ -471,14 +476,25 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
     const rot = a ? r() * Math.PI : 0;
     const off = a * r() * radius * (it.pointStyle === 2 ? 1.7 * 0.25 : 0.15);
     const c = g.add(p, g.mul(g.dir(r() * Math.PI * 2), off));
-    return { p, c, off, radius, ring: radius * 1.7, ratio, rot, r };
+    const mark = pointMarks.get(it);
+    let drawn: { strokes: Vec[][]; center: Vec; ring: number; reach: number } | undefined;
+    if (mark) {
+      const size = (fs / 1000) * Math.sqrt(it.thickness / 5) * (1 + a * (r() * 0.2 - 0.1));
+      const turn = a * (r() - 0.5) * 0.3;
+      const place = (q: Vec) => g.add(c, g.mul(g.rotate(q, turn), size));
+      const step = Math.max(0.5, pen.width * 0.35);
+      drawn = { strokes: mark.strokes.map((s) => evenly(s.map(place), step)), center: place(mark.center), ring: mark.ring * size, reach: mark.reach * size };
+    }
+    return { p, c, off, radius, ring: radius * 1.7, ratio, rot, r, drawn };
   };
+  const air = pen.width * 0.5 + 0.15 * PX_MM;
   // Open points first: no line runs through them, whatever is drawn before them.
   const holes: Hole[] = items
     .filter((it) => it.shape.type === 'point' && it.pointStyle === 2)
     .map((it) => {
       const h = handPoint(it);
-      return { c: h.c, r: h.ring * Math.max(1, h.ratio) + pen.width * 0.5 + 0.15 * PX_MM, ring: h.ring, seed: it.seed };
+      if (h.drawn) return { c: h.drawn.center, r: h.drawn.reach + air, ring: h.drawn.ring, seed: it.seed };
+      return { c: h.c, r: h.ring * Math.max(1, h.ratio) + air, ring: h.ring, seed: it.seed };
     })
     .filter((h) => inView(h.c, 2));
 
@@ -631,7 +647,19 @@ export function layoutSketch(scene: Scene, width: number, fs: number, pen: Pen):
           const hr = hp.r;
           let radius = hp.radius;
           const mark: Look = { seed: it.seed, color: it.color, weight: 0.9 * (1 + a * (hr() * 0.25 - 0.17)), straight: true, whole: true };
-          if (it.pointStyle === 2) {
+          if (hp.drawn) {
+            // As the user drew it, in the drawing's pen: the hand has done its shaking already.
+            const r = rng(mix(it.seed, 21));
+            radius = hp.drawn.reach;
+            for (const s of hp.drawn.strokes) {
+              if (s.length < 2) {
+                paths.push({ d: dot(s[0], pen.width * 0.55, r), color: it.color });
+                continue;
+              }
+              paths.push({ d: outline(s, r, pen, mark.weight), color: it.color });
+              lines.push(s);
+            }
+          } else if (it.pointStyle === 2) {
             // An open circle by pen: it starts anywhere and runs a little past its start or stops just short —
             // by hand also a little oval, and now and then its ends miss each other in a small loop.
             const r = rng(mix(it.seed, 21));

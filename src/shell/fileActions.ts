@@ -3,6 +3,7 @@ import { exportDesks, importDesks } from '../desk/desks';
 import { showDocument } from '../editor/docState';
 import { createDocument, exportEverything, exportHandwriting, getSetting, importEverything, importHandwriting } from '../storage/db';
 import { saveFile } from '../util/download';
+import { flushWrites } from '../util/flush';
 import { pickJsonFile } from '../util/pickFile';
 
 /** The full backup also carries «Мои столы» (their photos make it large). */
@@ -39,6 +40,8 @@ export async function openJson() {
 
 /** Handwriting, every document and the settings in one file. */
 export async function backupEverything() {
+  // With the words typed a moment ago.
+  await flushWrites();
   const withDesks = await getSetting(BACKUP_DESKS_KEY, false);
   const data = await exportEverything(withDesks ? await exportDesks() : undefined, await exportBlanks());
   const day = new Date().toISOString().slice(0, 10);

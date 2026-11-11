@@ -1,6 +1,7 @@
 // Where a point of the sheet lies in the photo — the same model as
 // crates/desk-core/src/warp.rs: the flat sheet's perspective, the bow of its
 // curved sides spread over it (a Coons patch), and a grid of corrections.
+import { bowOfCubic, spline, type Bow } from './bow';
 import { apply, homography, type Mat3, type Pt } from './homography';
 
 /** Corrections at grid nodes, photo px; nodes row by row, `nx` across, `ny` down. */
@@ -13,8 +14,10 @@ export interface Grid {
 export interface Warp {
   /** Top-left, top-right, bottom-right, bottom-left, clockwise on screen. */
   corners: Pt[];
-  /** Bow of each side (top, right, bottom, left) from its chord: cubic in the fraction along it, photo px outward. */
+  /** Bow of each side (top, right, bottom, left) from its chord: cubic in the fraction along it, photo px outward (as kept before `bows`). */
   bulge?: number[][] | null;
+  /** The same as splines with as many knots as each side needs (wins over `bulge`). */
+  bows?: Bow[] | null;
   grid?: Grid | null;
 }
 
@@ -22,8 +25,6 @@ export const GRID_NX = 5;
 export const GRID_NY = 7;
 
 export const zeroGrid = (nx = GRID_NX, ny = GRID_NY): Grid => ({ nx, ny, d: Array.from({ length: nx * ny }, () => [0, 0] as Pt) });
-
-export const poly = (c: number[], t: number) => c[0] + t * (c[1] + t * (c[2] + t * c[3]));
 
 const catmullRom = (t: number) => {
   const [t2, t3] = [t * t, t * t * t];
@@ -65,15 +66,17 @@ export function warpMap(w: Warp): WarpMap {
     const d: Pt = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
     return { a, d, n: [d[1], -d[0]] as Pt, len };
   });
+  const bows = w.bows ?? w.bulge?.map(bowOfCubic) ?? null;
+  const curves = bows?.map(spline) ?? null;
   const side = (k: number, q: Pt): Pt => {
     const s = sides[k];
     const t = Math.min(1, Math.max(0, ((q[0] - s.a[0]) * s.d[0] + (q[1] - s.a[1]) * s.d[1]) / s.len));
-    const m = poly(w.bulge![k], t);
+    const m = curves![k](t);
     return [s.n[0] * m, s.n[1] * m];
   };
   const map = ((u: number, v: number): Pt => {
     const p = apply(h, [u, v]);
-    if (w.bulge) {
+    if (curves) {
       const top = side(0, apply(h, [u, 0]));
       const right = side(1, apply(h, [1, v]));
       const bottom = side(2, apply(h, [u, 1]));

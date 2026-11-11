@@ -11,6 +11,7 @@ import { formulaOf, layoutFormula } from './formula';
 import { labelInk, type LabelInk } from './labels';
 import { blankBoxOf, layoutSketch, placeLabels, sketchHeight, sketchScale, type Around, type InkPath, type PlacedLabel, type SketchLayout } from './layout';
 import type { Pen } from './pen';
+import { pointsKey } from './pointInk';
 
 export interface Drawing {
   width: number;
@@ -64,7 +65,7 @@ const layouts = new Map<string, SketchLayout>();
 
 /** Lines and label places of a drawing `width` px wide (cached). */
 export function sketchLayout(code: string, width: number, fontSize: number, pen: Pen): SketchLayout {
-  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${pen.points ?? 1}|${pen.joins ?? 1}|${pen.compass ? 1 : 0}|${code}`;
+  const key = `${width}|${fontSize}|${pen.width}|${pen.pressure}|${pen.jitter}|${pen.wobble ?? 1}|${pen.overshoot ?? 1}|${pen.points ?? 1}|${pen.joins ?? 1}|${pen.compass ? 1 : 0}|${pointsKey()}|${code}`;
   const hit = layouts.get(key);
   if (hit) return hit;
   const tex = formulaOf(code);

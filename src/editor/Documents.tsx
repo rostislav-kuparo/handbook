@@ -18,6 +18,7 @@ import { useHandwriting } from '../engine/handwriting';
 import type { DocContent, HandDocument } from '../model/types';
 import { createDocument, db, getSetting, setSetting } from '../storage/db';
 import { BlockIcon, ExportIcon, NibIcon, PencilIcon } from '../ui/icons';
+import { onFlush } from '../util/flush';
 import { useLive } from '../util/useLive';
 import { docState, PRINT_EVENT, SHOW_DOC_EVENT } from './docState';
 import { exportDocumentJson, exportFont, exportPng, exportSvg } from './exporters';
@@ -310,17 +311,29 @@ export function Documents() {
   const docLayout = (doc && liveLayout?.id === doc.id ? liveLayout.layout : doc?.layout) ?? null;
   const layout = docLayout && docLayout.key === contentKey ? docLayout.nodes : null;
 
+  /** The text typed last, not yet in the database (it is saved a moment after the last key). */
+  const unsaved = useRef<{ id: string; content: DocContent } | null>(null);
+  const saveNow = useCallback(() => {
+    window.clearTimeout(saveTimer.current);
+    const u = unsaved.current;
+    unsaved.current = null;
+    return u ? db.documents.update(u.id, { content: u.content, updatedAt: Date.now() }).catch((err) => console.error(err)) : undefined;
+  }, []);
+  // Saved at once when asked (the window closes, a backup is made)…
+  useEffect(() => onFlush(saveNow), [saveNow]);
+  // …and when another document is opened or the tab is left: the timer of one document must not drop the words of another.
+  useEffect(() => () => void saveNow(), [currentId, saveNow]);
   const onChange = useCallback(
     (next: DocContent) => {
       const id = currentId;
       if (!id) return;
       setLoaded({ id, content: next });
+      if (unsaved.current && unsaved.current.id !== id) void saveNow();
+      unsaved.current = { id, content: next };
       window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        void db.documents.update(id, { content: next, updatedAt: Date.now() });
-      }, 400);
+      saveTimer.current = window.setTimeout(() => void saveNow(), 400);
     },
-    [currentId],
+    [currentId, saveNow],
   );
 
   /** A new note in the middle of what is in view (over the text column), its text being typed. */

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { isDesktop } from '../util/download';
+import { flushWrites } from '../util/flush';
 import { WebMenu, type CommandId } from './menu';
 
 const appWindow = async () => (await import('@tauri-apps/api/window')).getCurrentWindow();
@@ -58,7 +59,7 @@ function WindowButtons() {
           )}
         </svg>
       </button>
-      <button className="close" onClick={() => void appWindow().then((w) => w.close())} title="Закрыть" aria-label="Закрыть">
+      <button className="close" onClick={() => void flushWrites().then(appWindow).then((w) => w.close())} title="Закрыть" aria-label="Закрыть">
         <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden>
           <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" />
         </svg>

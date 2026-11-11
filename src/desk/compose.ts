@@ -859,8 +859,15 @@ export class DeskRenderer {
     );
   }
 
-  /** The current picture as a JPEG file. */
-  async jpeg(quality = 0.92): Promise<Blob> {
+  /** The current picture as a JPEG file; `crop` (left, top, right, bottom, px): only that part, pixel for pixel. */
+  async jpeg(quality = 0.92, crop?: number[] | null): Promise<Blob> {
+    if (crop) {
+      const [x0, y0, x1, y1] = crop.map(Math.round);
+      const c = new OffscreenCanvas(Math.max(1, x1 - x0), Math.max(1, y1 - y0));
+      // Taken at once, while the drawn picture is still there.
+      c.getContext('2d')!.drawImage(this.canvas, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+      return c.convertToBlob({ type: 'image/jpeg', quality });
+    }
     const blob = await new Promise<Blob | null>((res) => this.canvas.toBlob(res, 'image/jpeg', quality));
     if (!blob) throw new Error('Не удалось сохранить картинку');
     return blob;

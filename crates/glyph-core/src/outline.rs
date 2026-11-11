@@ -35,7 +35,7 @@ pub fn skeleton(ink: &GlyphInk, style: &Style) -> Vec<Vec<[f64; 4]>> {
     if ps.is_empty() {
         return vec![];
     }
-    ps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ps.sort_by(|a, b| a.total_cmp(b));
     let med = ps[ps.len() / 2].max(0.05);
     let half = style.weight / 2.0;
     let k = style.pressure.clamp(0.0, 1.0);

@@ -4,6 +4,7 @@ import { blankBox } from '../sketch/render';
 import type { NodeLayout } from './docLayout';
 import type { PMNodeJSON } from './layout';
 import type { Geometry } from './page';
+import { startsPage } from './pageBreak';
 
 export type InkItem = { kind: 'line'; para: number; line: number } | { kind: 'block'; node: number };
 export type PlacedItem = InkItem & { y: number };
@@ -53,6 +54,11 @@ export function flowPages(
       if (n.attrs?.float) return;
       place({ kind: 'block', node: i }, blockSpan(blockHeight(i), lh));
     } else {
+      // «С новой страницы»: a fresh sheet, unless this one has nothing on it yet.
+      if (i > 0 && startsPage(n) && out[out.length - 1].length > 0) {
+        out.push([]);
+        y = 0;
+      }
       for (let k = 0; k < lineCount(i); k++) place({ kind: 'line', para: i, line: k }, lh);
     }
   });

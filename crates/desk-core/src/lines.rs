@@ -98,7 +98,7 @@ fn pieces(img: &Gray) -> Vec<Piece> {
         }
     }
     let mut order: Vec<u32> = (0..(w * h) as u32).filter(|&i| mag[i as usize] > RHO).collect();
-    order.sort_unstable_by(|&a, &b| mag[b as usize].partial_cmp(&mag[a as usize]).unwrap());
+    order.sort_unstable_by(|&a, &b| mag[b as usize].total_cmp(&mag[a as usize]));
     let mut used = vec![false; w * h];
     let mut out = vec![];
     let mut region: Vec<usize> = vec![];
@@ -300,6 +300,6 @@ fn join(pieces: &[Piece], min_len: f64) -> Vec<Joined> {
         }
         out.push(Joined { a: [cx + d[0] * l0, cy + d[1] * l0], b: [cx + d[0] * l1, cy + d[1] * l1], seen });
     }
-    out.sort_by(|p, q| q.seen.partial_cmp(&p.seen).unwrap());
+    out.sort_by(|p, q| q.seen.total_cmp(&p.seen));
     out
 }

@@ -199,6 +199,13 @@ export const ActualIcon = () => (
   </Icon>
 );
 
+/** A crop frame: two corners crossing. */
+export const CropIcon = () => (
+  <Icon>
+    <path d="M6 2.5V14h11.5M2.5 6H14v11.5" />
+  </Icon>
+);
+
 /** A close cross. */
 export const CloseIcon = () => (
   <Icon>

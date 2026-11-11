@@ -1,6 +1,7 @@
 // What the photo itself tells: where the sheet is, how blurred and noisy the
 // picture is, where the lamp burns the paper out, what colour a real pen
 // writes. The Rust analysis (crates/desk-core) runs in its own worker.
+import type { Bow } from './bow';
 import type { Pt } from './homography';
 import type { Photo } from './photo';
 import type { Grid, Warp } from './warp';
@@ -116,10 +117,10 @@ export interface ObjectMask {
   data: Uint8Array;
 }
 
-/** The sheet's edges as curves: where they meet, and how each side bows from its chord (cubic, px outward). */
+/** The sheet's edges as curves: where they meet, and how each side bows from its chord (a spline, px outward). */
 export interface Curved {
   corners: Pt[];
-  bulge: number[][];
+  bows: Bow[];
   /** The largest bow, px. */
   max: number;
   fitted: boolean[];
@@ -150,23 +151,46 @@ export interface Tilt {
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
 export class Analyzer {
-  private readonly worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  private worker = this.spawn();
   private readonly pending = new Map<number, Pending>();
   private next = 1;
   /** Which photo the worker holds (it keeps one at a time). */
   private holds: { id: string; ready: Promise<void> } | null = null;
+  private closed = false;
 
-  constructor() {
-    this.worker.onmessage = (e: MessageEvent<{ id: number; ok: boolean; result?: unknown; error?: string }>) => {
+  private spawn(): Worker {
+    const w = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+    w.onmessage = (e: MessageEvent<{ id: number; ok: boolean; result?: unknown; error?: string; crashed?: boolean }>) => {
+      // A worker already replaced may still have answers on their way.
+      if (w !== this.worker) return;
       const p = this.pending.get(e.data.id);
-      if (!p) return;
       this.pending.delete(e.data.id);
-      if (e.data.ok) p.resolve(e.data.result);
-      else p.reject(new Error(e.data.error));
+      if (e.data.ok) p?.resolve(e.data.result);
+      else p?.reject(new Error(e.data.error));
+      if (e.data.crashed) this.restart();
     };
+    // The worker itself failed (its script or the analysis did not load): nothing waits for ever.
+    w.onerror = (e) => {
+      if (w === this.worker) this.failAll(e.message || 'Разбор фото не запустился');
+    };
+    return w;
+  }
+
+  private failAll(why: string) {
+    for (const p of this.pending.values()) p.reject(new Error(why));
+    this.pending.clear();
+  }
+
+  /** After a crash the analysis answers nothing: a new worker takes over, and is handed the photo again when next asked. */
+  private restart() {
+    this.worker.terminate();
+    this.holds = null;
+    this.failAll('Разбор фото прервался: попробуйте ещё раз');
+    if (!this.closed) this.worker = this.spawn();
   }
 
   private call<T>(req: AnalysisOp, transfer: Transferable[] = []): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('закрыто'));
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
@@ -180,7 +204,12 @@ export class Analyzer {
       const ctx = new OffscreenCanvas(photo.width, photo.height).getContext('2d', { willReadFrequently: true })!;
       ctx.drawImage(photo.bitmap, 0, 0);
       const rgba = new Uint8Array(ctx.getImageData(0, 0, photo.width, photo.height).data.buffer);
-      this.holds = { id, ready: this.call({ op: 'setPhoto', rgba, width: photo.width, height: photo.height }, [rgba.buffer]) };
+      const held = { id, ready: this.call<void>({ op: 'setPhoto', rgba, width: photo.width, height: photo.height }, [rgba.buffer]) };
+      this.holds = held;
+      // A photo that did not get there is handed over anew the next time, not failed for ever.
+      held.ready.catch(() => {
+        if (this.holds === held) this.holds = null;
+      });
     }
     return this.holds.ready;
   }
@@ -193,6 +222,8 @@ export class Analyzer {
   calibrate = (x: number, y: number, radius: number, sigma: number) => this.call<Calib | null>({ op: 'calibrate', x, y, radius, sigma });
   ruling = (warp: Warp, wMm: number, hMm: number) => this.call<Ruling | null>({ op: 'ruling', warp, wMm, hMm });
   curvedSides = (corners: Pt[]) => this.call<Curved>({ op: 'curvedSides', corners });
+  /** Where the sheet's edge is near the fraction `t` of the side a → b: px along its outward normal, or null. */
+  edgeOffset = (a: Pt, b: Pt, t: number) => this.call<number | null>({ op: 'edgeOffset', a, b, t });
   bend = (warp: Warp, wMm: number, hMm: number, r: Ruling, nx: number, ny: number) =>
     this.call<BendFit>({ op: 'bend', warp, wMm, hMm, step: r.step, offset: r.offset, slope: r.slope, nx, ny });
   mask = (corners: Pt[], wMm: number, hMm: number, scale = 2) => this.call<ObjectMask>({ op: 'mask', corners, wMm, hMm, scale });
@@ -200,8 +231,8 @@ export class Analyzer {
   perspective = (focal: number) => this.call<Tilt | null>({ op: 'perspective', focal });
 
   dispose() {
+    this.closed = true;
     this.worker.terminate();
-    for (const p of this.pending.values()) p.reject(new Error('закрыто'));
-    this.pending.clear();
+    this.failAll('закрыто');
   }
 }

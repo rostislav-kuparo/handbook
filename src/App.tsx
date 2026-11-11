@@ -10,6 +10,7 @@ import { TitleBar } from './shell/TitleBar';
 import { getSetting, setSetting } from './storage/db';
 import { Studio } from './studio/Studio';
 import { isDesktop } from './util/download';
+import { flushWrites } from './util/flush';
 import { useLive } from './util/useLive';
 
 type Tab = 'docs' | 'studio';
@@ -148,7 +149,8 @@ export function App() {
         go('docs');
         return requestPrint();
       case 'app.quit':
-        return void import('@tauri-apps/api/window').then(({ getCurrentWindow }) => getCurrentWindow().close());
+        // What was typed last is saved first.
+        return void flushWrites().then(() => import('@tauri-apps/api/window')).then(({ getCurrentWindow }) => getCurrentWindow().close());
       case 'theme.system':
       case 'theme.light':
       case 'theme.dark':

@@ -1,7 +1,7 @@
 // The ink of one document sheet, ready to be written onto a photo: the
 // ink-only page export, placed on the photographed paper and rasterised at the
 // size the photo needs — plus what the pen did along each stroke.
-import { documentPages, type DrawingFit, type PageExport, type PenStroke, type SheetLayers } from '../editor/exporters';
+import { documentPages, type DrawingFit, type PageExport, type PagesRun, type PenStroke, type SheetLayers } from '../editor/exporters';
 import type { WorkMap } from '../wear/wear';
 import { LINE_HEIGHT_EM } from '../editor/layout';
 import { A4, geometry, MM, type PageSetup, type SheetSize } from '../editor/page';
@@ -74,8 +74,6 @@ export function paperSize([w, h]: [number, number]): SheetSize {
 export const isA4 = ([w, h]: [number, number]) => Math.abs(w - 210) < 0.5 && Math.abs(h - 297) < 0.5;
 
 export interface InkLayout {
-  /** Ink-only SVG of every sheet. */
-  pages: string[];
   /** Pen strokes of every sheet (page px). */
   strokes: PenStroke[][];
   /** Size of those sheets (CSS px). */
@@ -123,6 +121,7 @@ export async function inkLayout(
   lines: Lines | null = null,
   choice: LineChoice = AUTO_LINES,
   margins: HandMargins | null = null,
+  run: PagesRun = {},
 ): Promise<InkLayout> {
   const paper = paperSize(paperMm);
   const strokes: PenStroke[][] = [];
@@ -133,7 +132,7 @@ export async function inkLayout(
   const loose = !lines && hasAny(margins) ? margins : null;
   // Paper the same as the editor's sheet takes the sheet as it is.
   if (Math.abs(paper.w - g.sheet.w) < 2 && Math.abs(paper.h - g.sheet.h) < 2 && !lines && !loose) mode = 'document';
-  if (mode === 'document' && lines) return asInDocument(base, setup, paper, lines, choice);
+  if (mode === 'document' && lines) return asInDocument(base, setup, paper, lines, choice, run);
   if (mode === 'document') {
     // The editor's sheet as it is (A4, or a blank's paper), shrunk into the margins or onto the whole paper, centred.
     const box = loose ? textBox(loose, setup, paper) : null;
@@ -142,16 +141,16 @@ export async function inkLayout(
     const place = box
       ? mul(lean(box.tilt), [k, 0, bx - g.margin.left * k, 0, k, by - g.margin.top * k, 0, 0, 1])
       : [k, 0, (paper.w - g.sheet.w * k) / 2, 0, k, (paper.h - g.sheet.h * k) / 2, 0, 0, 1];
-    const pages = await documentPages(base, { inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
-    return { pages, strokes, size: g.sheet, paper, place, ref: null, fontSize: base.fontSize, layers, work };
+    await documentPages(base, { ...run, inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
+    return { strokes, size: g.sheet, paper, place, ref: null, fontSize: base.fontSize, layers, work };
   }
   if (!lines) {
     const box = loose ? textBox(loose, setup, paper) : null;
     const fitted: PageSetup = box ? { ...setup, margins: { top: box.top / MM, bottom: box.bottom / MM, left: box.left / MM, right: box.right / MM } } : setup;
     const geo = geometry(fitted, paper, true);
     // Re-flowed onto other paper: not the editor's lines.
-    const pages = await documentPages({ ...base, geo, layout: null }, { inkOnly: true, layers, work, strokes, drawings: { width: g.contentW, minPen: MIN_PEN } });
-    return { pages, strokes, size: paper, paper, place: lean(box?.tilt ?? 0), ref: null, fontSize: base.fontSize, layers, work };
+    await documentPages({ ...base, geo, layout: null }, { ...run, inkOnly: true, layers, work, strokes, drawings: { width: g.contentW, minPen: MIN_PEN } });
+    return { strokes, size: paper, paper, place: lean(box?.tilt ?? 0), ref: null, fontSize: base.fontSize, layers, work };
   }
   // A line of text per ruled line, or per two squares, unless chosen otherwise; letters filling it.
   const pitch = (choice.every ?? (lines.kind === 'grid' ? 2 : 1)) * lines.step;
@@ -172,8 +171,8 @@ export async function inkLayout(
     grid: squaresOf(lines, choice, 1, [geo.margin.left, geo.margin.top]),
     minPen: MIN_PEN,
   };
-  const pages = await documentPages({ ...base, fontSize, geo, layout: null }, { inkOnly: true, layers, work, strokes, pitch, drawings });
-  return { pages, strokes, size: paper, paper, place: lean(tilt), ref: { lines, first, pitch }, fontSize, layers, work };
+  await documentPages({ ...base, fontSize, geo, layout: null }, { ...run, inkOnly: true, layers, work, strokes, pitch, drawings });
+  return { strokes, size: paper, paper, place: lean(tilt), ref: { lines, first, pitch }, fontSize, layers, work };
 }
 
 /**
@@ -181,7 +180,7 @@ export async function inkLayout(
  * photographed paper of `paperMm` — the ink goes exactly where the printer
  * puts the blank (`printMatrix`), nothing re-flowed.
  */
-export async function blankLayout(base: PageExport, paperMm: [number, number], print: PrintChoice, shrink = 1): Promise<InkLayout> {
+export async function blankLayout(base: PageExport, paperMm: [number, number], print: PrintChoice, shrink = 1, run: PagesRun = {}): Promise<InkLayout> {
   const paper = paperSize(paperMm);
   const size = base.geo.sheet;
   const place = printMatrix(size, paper, print, shrink);
@@ -189,8 +188,8 @@ export async function blankLayout(base: PageExport, paperMm: [number, number], p
   const strokes: PenStroke[][] = [];
   const layers: SheetLayers[] = [];
   const work: WorkMap[] = [];
-  const pages = await documentPages(base, { inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
-  return { pages, strokes, size, paper, place, ref: null, fontSize: base.fontSize, layers, work };
+  await documentPages(base, { ...run, inkOnly: true, layers, work, strokes, drawings: { keepPages: true, minPen: MIN_PEN / k } });
+  return { strokes, size, paper, place, ref: null, fontSize: base.fontSize, layers, work };
 }
 
 /**
@@ -241,7 +240,7 @@ function textBox(m: HandMargins, setup: PageSetup, paper: SheetSize) {
  * nearest to the scaled line height that still lets the editor's sheet fit),
  * each baseline on a printed line.
  */
-async function asInDocument(base: PageExport, setup: PageSetup, paper: SheetSize, lines: Lines, choice: LineChoice): Promise<InkLayout> {
+async function asInDocument(base: PageExport, setup: PageSetup, paper: SheetSize, lines: Lines, choice: LineChoice, run: PagesRun): Promise<InkLayout> {
   const g = base.geo;
   const lh = base.fontSize * LINE_HEIGHT_EM;
   const box = textBox(lines.margins, setup, paper);
@@ -269,8 +268,8 @@ async function asInDocument(base: PageExport, setup: PageSetup, paper: SheetSize
   const strokes: PenStroke[][] = [];
   const layers: SheetLayers[] = [];
   const work: WorkMap[] = [];
-  const pages = await documentPages({ ...base, geo: { ...g, sheet: size } }, { inkOnly: true, layers, work, strokes, pitch: docPitch, drawings });
-  return { pages, strokes, size, paper, place, ref: { lines, first, pitch }, fontSize: base.fontSize, layers, work };
+  await documentPages({ ...base, geo: { ...g, sheet: size } }, { ...run, inkOnly: true, layers, work, strokes, pitch: docPitch, drawings });
+  return { strokes, size, paper, place, ref: { lines, first, pitch }, fontSize: base.fontSize, layers, work };
 }
 
 /**
@@ -412,6 +411,11 @@ const blankCanvas = (size: SheetSize, scale: number) => {
   canvas.height = Math.max(1, Math.round(size.h * scale));
   return canvas;
 };
+
+/** Gives a picture's memory back now, not when the garbage is next collected: a sheet's pictures take hundreds of MB. */
+export function freeCanvases(...canvases: (HTMLCanvasElement | null)[]) {
+  for (const c of canvases) if (c) c.width = c.height = 0;
+}
 
 /** One sheet's SVG drawn as pixels; the browser renders the vectors afresh at this size. */
 export async function rasterize(svg: string, size: SheetSize, scale: number): Promise<HTMLCanvasElement> {
